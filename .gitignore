@@ -1,0 +1,14 @@
+# builds (published as GitHub release assets)
+*.apk
+*.exe
+build/
+.gradle/
+local.properties
+*.iml
+.idea/
+
+# python
+__pycache__/
+
+# not wired into the app
+pc-agent/unlock.py
