@@ -26,6 +26,7 @@ jobs:
         run: python3 -m pip install --user pyinstaller pystray pillow
 
       - name: Smoke test (agent, key press, GUI under Xvfb)
+        timeout-minutes: 5
         run: SHOTS_DIR=ci-shots xvfb-run -a -s "-screen 0 1280x800x24" python3 pc-agent/ci_smoke.py
 
       - name: Test linux/install.sh (from source)

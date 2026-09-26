@@ -625,8 +625,18 @@ class App(tk.Tk):
         self.lift()
         self.focus_force()
 
+    def tray_usable(self):
+        """False when there is nowhere to hide: no tray library, or no tray on this Linux desktop."""
+        if not self.tray:
+            return False
+        if IS_WIN:
+            return True
+        if type(self.tray).__module__.endswith("_xorg"):
+            return bool(getattr(self.tray, "_systray_manager", None))  # None: the icon never docked
+        return self.tray.HAS_MENU
+
     def on_close(self):
-        if not self.tray or not (IS_WIN or self.tray.HAS_MENU):
+        if not self.tray_usable():
             # Linux desktops without a usable tray (stock GNOME): keep the window reachable via the taskbar
             self.editor.save(quiet=True)
             self.iconify()
@@ -1449,6 +1459,8 @@ def main():
         busy = getattr(e, "winerror", None) == 10048 or getattr(e, "errno", None) in (98, 48)
         error = "порт занят" if busy else str(e)
     App(server, error, "--minimized" in sys.argv).mainloop()
+    if not IS_WIN:
+        os._exit(0)  # pystray's X11 thread is not a daemon and would keep the process alive
 
 
 if __name__ == "__main__":

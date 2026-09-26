@@ -74,8 +74,21 @@ def grab(name):
     print("shot", name)
 
 
+result = {}
+
+
 def done():
-    print("fonts:", da.F.display, "|", da.F.text, "| icons:", da.F.icon, "| tray:", bool(app.tray))
+    try:
+        print("fonts:", da.F.display, "|", da.F.text, "| icons:", da.F.icon, "| tray docked:", app.tray_usable())
+        app.on_close()  # no tray on Xvfb: must minimise, not hide
+        app.update()
+        result["closed"] = app.state()
+        result["tray"] = app.tray_usable()
+    finally:
+        finish()
+
+
+def finish():
     if app.editor.autosave_job:
         app.editor.after_cancel(app.editor.autosave_job)
     app.editor.saved = app.editor._snapshot()
@@ -87,4 +100,7 @@ def done():
 
 app.after(1500, lambda: shot(0))
 app.mainloop()
-print("gui ok")
+print("after close:", result)
+ok = result.get("closed") == "iconic" or result.get("tray")
+print("gui ok" if ok else "gui FAILED")
+os._exit(0 if ok else 1)  # pystray's X11 thread is not a daemon
