@@ -483,7 +483,7 @@ class App(tk.Tk):
                 w.bind("<Enter>", lambda e, k=key: self._nav_hover(k, True))
                 w.bind("<Leave>", lambda e, k=key: self._nav_hover(k, False))
             self.nav[key] = (bar, ic, lb)
-        txt(side, "v1.1", 8, FAINT).pack(side="bottom", anchor="w", padx=28, pady=24)
+        txt(side, "v1.2", 8, FAINT).pack(side="bottom", anchor="w", padx=28, pady=24)
 
         self.pages = {
             "conn": ConnectionPage(self.body, self),
