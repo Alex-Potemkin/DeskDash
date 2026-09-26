@@ -1,4 +1,4 @@
-"""DeskDash for Windows: the phone agent + a window to connect the phone and edit macros.
+"""DeskDash for Windows: the phone agent + a small, quiet window to connect the phone and edit macros.
 
 Built into DeskDash.exe with build_exe.py. Runs the agent in the background and lives in the tray.
 """
@@ -9,14 +9,14 @@ import os
 import queue
 import re
 import secrets
-import subprocess
 import sys
 import threading
 import time
 import tkinter as tk
+import tkinter.font as tkfont
 import urllib.request
 import winreg
-from tkinter import filedialog, messagebox, ttk
+from tkinter import filedialog, messagebox
 
 import pystray
 from PIL import Image, ImageDraw
@@ -24,25 +24,39 @@ from PIL import Image, ImageDraw
 import deskdash_agent as agent
 import spotify
 
-BG, SURFACE, FIELD = "#17120F", "#231B17", "#2E2420"
-TEXT, DIM, ACCENT, DANGER = "#F1E6DA", "#9C8B7E", "#C8A27C", "#E5534B"
-FONT = "Segoe UI"
+BG, HOVER, LINE = "#141110", "#1D1816", "#2A2320"
+TEXT, DIM, FAINT, ACCENT, DANGER = "#EDE6DD", "#8A7F76", "#5A514B", "#C8A27C", "#E5534B"
 APP_ID = "DeskDash"
 RUN_KEY = r"Software\Microsoft\Windows\CurrentVersion\Run"
 
+# Segoe Fluent Icons code points (Segoe MDL2 Assets on Windows 10 has the same ones)
 ICON_GLYPH = {
-    "bolt": "⚡", "web": "🌐", "settings": "⚙", "open": "↗", "lock": "🔒", "mute": "🔇",
-    "vol_up": "🔊", "vol_down": "🔉", "play": "▶", "pause": "⏸", "next": "⏭", "prev": "⏮",
-    "desktop": "🖥", "sleep": "🌙", "screenshot": "✂", "power": "⭘", "music": "♪", "eye_off": "◌",
+    "bolt": "", "web": "", "settings": "", "open": "", "lock": "",
+    "mute": "", "vol_up": "", "vol_down": "", "play": "", "pause": "",
+    "next": "", "prev": "", "desktop": "", "sleep": "", "screenshot": "",
+    "power": "", "music": "", "eye_off": "",
 }
-KINDS = [("keys", "Клавиши"), ("site", "Сайт"), ("settings", "Настройки Windows"),
-         ("run", "Программа"), ("file", "Файл / папка"), ("system", "Система"), ("wait", "Пауза, мс")]
+ICON_NAMES = {
+    "bolt": "молния", "web": "сайт", "settings": "настройки", "open": "открыть", "lock": "замок",
+    "mute": "без звука", "vol_up": "громче", "vol_down": "тише", "play": "плей", "pause": "пауза",
+    "next": "вперёд", "prev": "назад", "desktop": "монитор", "sleep": "сон", "screenshot": "скриншот",
+    "power": "питание", "music": "музыка", "eye_off": "экран",
+}
+NAV = [("conn", "", "Подключение"), ("macros", "", "Макросы"),
+       ("spotify", "", "Spotify"), ("settings", "", "Настройки")]
+DEVICE_GLYPH = {"Computer": "", "Smartphone": "", "Tablet": "", "Speaker": "",
+                "TV": "", "CastVideo": "", "CastAudio": "", "AVR": "",
+                "GameConsole": "", "Automobile": ""}
+DEVICE_RU = {"Computer": "компьютер", "Smartphone": "телефон", "Tablet": "планшет", "Speaker": "колонка",
+             "TV": "телевизор", "CastVideo": "Chromecast", "CastAudio": "Chromecast", "AVR": "ресивер",
+             "GameConsole": "консоль", "Automobile": "автомобиль"}
+
+KINDS = [("keys", "клавиши"), ("site", "сайт"), ("settings", "настройки Windows"),
+         ("run", "программа"), ("file", "файл или папка"), ("system", "система"), ("wait", "пауза, мс")]
 KIND_LABEL = dict(KINDS)
-LABEL_KIND = {v: k for k, v in KINDS}
-SYSTEM = [("lock", "Заблокировать"), ("monitor_off", "Погасить экран"), ("sleep", "Сон"),
-          ("hibernate", "Гибернация"), ("shutdown", "Выключить"), ("restart", "Перезагрузить")]
+SYSTEM = [("lock", "заблокировать"), ("monitor_off", "погасить экран"), ("sleep", "сон"),
+          ("hibernate", "гибернация"), ("shutdown", "выключить"), ("restart", "перезагрузить")]
 SYSTEM_LABEL = dict(SYSTEM)
-LABEL_SYSTEM = {v: k for k, v in SYSTEM}
 DANGEROUS = {"sleep", "hibernate", "shutdown", "restart"}
 WIN_SETTINGS = [
     ("Звук", "ms-settings:sound"), ("Bluetooth", "ms-settings:bluetooth"),
@@ -55,9 +69,8 @@ WIN_SETTINGS = [
     ("Сеть", "ms-settings:network-status"), ("Параметры", "ms-settings:"),
 ]
 SETTINGS_LABEL = dict((u, n) for n, u in WIN_SETTINGS)
-LABEL_SETTINGS = dict(WIN_SETTINGS)
 TEMPLATES = [
-    ("Пустой макрос", "Новый", "bolt", False, [("keys", "")]),
+    ("Пустой", "Новый", "bolt", False, [("keys", "")]),
     ("Открыть сайт", "Сайт", "web", False, [("site", "https://")]),
     ("Настройки Windows", "Звук", "settings", False, [("settings", "ms-settings:sound")]),
     ("Запустить программу", "Программа", "open", False, [("run", "")]),
@@ -145,8 +158,23 @@ def ago(t):
     return time.strftime("%H:%M", time.localtime(t))
 
 
-def label(parent, text="", style="TLabel", **kw):
-    return ttk.Label(parent, text=text, style=style, **kw)
+def dark_title_bar(win):
+    """Dark, background-coloured native title bar (Windows 10 20H1+ / 11)."""
+    try:
+        hwnd = ctypes.windll.user32.GetParent(win.winfo_id())
+        dwm = ctypes.windll.dwmapi
+        on = ctypes.c_int(1)
+        dwm.DwmSetWindowAttribute(hwnd, 20, ctypes.byref(on), 4)  # DWMWA_USE_IMMERSIVE_DARK_MODE
+
+        def colorref(hex_color):
+            r, g, b = int(hex_color[1:3], 16), int(hex_color[3:5], 16), int(hex_color[5:7], 16)
+            return ctypes.c_int(r | g << 8 | b << 16)
+
+        dwm.DwmSetWindowAttribute(hwnd, 35, ctypes.byref(colorref(BG)), 4)  # caption colour (Win 11)
+        dwm.DwmSetWindowAttribute(hwnd, 36, ctypes.byref(colorref(DIM)), 4)  # caption text
+        dwm.DwmSetWindowAttribute(hwnd, 34, ctypes.byref(colorref(BG)), 4)  # border
+    except Exception:  # noqa: BLE001 — cosmetic, older Windows
+        pass
 
 
 # ================================================================ macro model
@@ -229,47 +257,199 @@ def validate(m):
     return None
 
 
+# ================================================================ tiny UI kit
+
+class F:
+    """Fonts, resolved once the Tk root exists (Segoe UI Variable on Windows 11, Segoe UI otherwise)."""
+    display = text = semi = icon = mono = None
+
+    @classmethod
+    def init(cls):
+        fams = set(tkfont.families())
+
+        def pick(*names):
+            return next((n for n in names if n in fams), "Segoe UI")
+
+        cls.display = pick("Segoe UI Variable Display Light", "Segoe UI Light")
+        cls.text = pick("Segoe UI Variable Text", "Segoe UI")
+        cls.semi = pick("Segoe UI Variable Text Semibold", "Segoe UI Semibold")
+        cls.icon = pick("Segoe Fluent Icons", "Segoe MDL2 Assets")
+        cls.mono = pick("Cascadia Mono Light", "Cascadia Mono", "Consolas")
+
+
+def bg_of(w):
+    try:
+        return w.cget("bg")
+    except tk.TclError:
+        return BG
+
+
+def txt(parent, s="", size=10, color=TEXT, font=None, **kw):
+    return tk.Label(parent, text=s, bg=bg_of(parent), fg=color, font=(font or F.text, size),
+                    bd=0, padx=0, pady=0, **kw)
+
+
+def caption(parent, s):
+    """Small, quiet section heading."""
+    return txt(parent, s.upper(), 8, FAINT, F.semi)
+
+
+def link(parent, s, command, color=DIM, hover=TEXT, size=10, font=None):
+    lbl = txt(parent, s, size, color, font, cursor="hand2")
+    lbl.bind("<Enter>", lambda e: lbl.config(fg=hover))
+    lbl.bind("<Leave>", lambda e: lbl.config(fg=lbl.base_color))
+    lbl.bind("<Button-1>", lambda e: command())
+    lbl.base_color = color
+    return lbl
+
+
+def set_link_color(lbl, color):
+    lbl.base_color = color
+    lbl.config(fg=color)
+
+
+class Field(tk.Frame):
+    """Borderless entry with a hairline underneath that lights up on focus."""
+
+    def __init__(self, parent, var, size=11, font=None, width=None, on_change=None, on_commit=None,
+                 placeholder=""):
+        super().__init__(parent, bg=bg_of(parent))
+        self.var = var
+        self.placeholder = placeholder
+        self.entry = tk.Entry(self, textvariable=var, bg=bg_of(parent), fg=TEXT, insertbackground=TEXT,
+                              relief="flat", bd=0, highlightthickness=0, font=(font or F.text, size),
+                              selectbackground=LINE, selectforeground=TEXT, disabledbackground=bg_of(parent))
+        if width:
+            self.entry.config(width=width)
+        self.entry.pack(fill="x", pady=(0, 4))
+        self.line = tk.Frame(self, bg=LINE, height=1)
+        self.line.pack(fill="x")
+        self.entry.bind("<FocusIn>", lambda e: self.line.config(bg=ACCENT))
+        self.entry.bind("<FocusOut>", lambda e: (self.line.config(bg=LINE), on_commit and on_commit()))
+        if on_commit:
+            self.entry.bind("<Return>", lambda e: on_commit())
+        if on_change:
+            var.trace_add("write", lambda *_: on_change())
+
+
+class Toggle(tk.Label):
+    """"●  text" / "○  text" switch."""
+
+    def __init__(self, parent, text, value, command):
+        super().__init__(parent, bg=bg_of(parent), font=(F.text, 10), cursor="hand2", bd=0, anchor="w")
+        self.text, self.value, self.command = text, bool(value), command
+        self.bind("<Button-1>", lambda e: self.flip())
+        self._paint()
+
+    def flip(self):
+        self.value = not self.value
+        self._paint()
+        self.command(self.value)
+
+    def set(self, v):
+        self.value = bool(v)
+        self._paint()
+
+    def _paint(self):
+        self.config(text=("●   " if self.value else "○   ") + self.text, fg=TEXT if self.value else DIM)
+
+
+def popup(widget, options, command):
+    """Quiet dropdown: a native menu under the widget. options: [(value, label)]."""
+    m = tk.Menu(widget, tearoff=0, bg=HOVER, fg=TEXT, activebackground=LINE, activeforeground=TEXT,
+                bd=0, relief="flat", font=(F.text, 10))
+    for value, lbl in options:
+        m.add_command(label=lbl, command=lambda v=value: command(v))
+    m.tk_popup(widget.winfo_rootx(), widget.winfo_rooty() + widget.winfo_height() + 2)
+
+
+class Scroll(tk.Frame):
+    """Vertically scrollable area without a visible scrollbar (mouse wheel only)."""
+
+    def __init__(self, parent, **kw):
+        super().__init__(parent, bg=bg_of(parent), **kw)
+        self.canvas = tk.Canvas(self, bg=bg_of(parent), highlightthickness=0, bd=0)
+        self.canvas.pack(fill="both", expand=True)
+        self.inner = tk.Frame(self.canvas, bg=bg_of(parent))
+        self.win = self.canvas.create_window(0, 0, window=self.inner, anchor="nw")
+        self.inner.bind("<Configure>", lambda e: self.canvas.configure(scrollregion=self.canvas.bbox("all")))
+        self.canvas.bind("<Configure>", lambda e: self.canvas.itemconfigure(self.win, width=e.width))
+        for w in (self.canvas, self.inner):
+            w.bind("<Enter>", lambda e: self.canvas.bind_all("<MouseWheel>", self._wheel))
+            w.bind("<Leave>", lambda e: self.canvas.unbind_all("<MouseWheel>"))
+
+    def _wheel(self, e):
+        if self.inner.winfo_height() > self.canvas.winfo_height():
+            self.canvas.yview_scroll(int(-e.delta / 120) * 2, "units")
+
+
 # ================================================================ app
 
 class App(tk.Tk):
     def __init__(self, server, error, minimized):
         super().__init__()
+        F.init()
         self.server = server
+        self.error = error
         self.events = queue.Queue()
+        self.sp_devices = []
+        self.sp_error = ""
         self.title("DeskDash")
-        self.geometry("980x640")
-        self.minsize(860, 560)
+        self.geometry("920x600")
+        self.minsize(780, 520)
         self.configure(bg=BG)
+        self.option_add("*Menu.font", (F.text, 10))
         ico = os.path.join(agent.DATA_DIR, "icon.ico")
         try:
             make_icon(256).save(ico, sizes=[(16, 16), (24, 24), (32, 32), (48, 48), (256, 256)])
             self.iconbitmap(ico)
         except Exception:  # noqa: BLE001 — cosmetic
             pass
-        self._style()
 
-        top = ttk.Frame(self, padding=(22, 16, 22, 0))
-        top.pack(fill="x")
-        label(top, "DeskDash", "Title.TLabel").pack(side="left")
-        self.state_lbl = label(top, "", "Dim.TLabel")
-        self.state_lbl.pack(side="left", padx=(16, 0), pady=(6, 0))
+        side = tk.Frame(self, bg=BG, width=200)
+        side.pack(side="left", fill="y")
+        side.pack_propagate(False)
+        tk.Frame(self, bg=LINE, width=1).pack(side="left", fill="y", pady=28)
+        self.body = tk.Frame(self, bg=BG)
+        self.body.pack(side="left", fill="both", expand=True)
+
+        head = tk.Frame(side, bg=BG)
+        head.pack(fill="x", padx=28, pady=(30, 36))
+        txt(head, "DeskDash", 15, TEXT, F.display).pack(anchor="w")
+        self.state_lbl = txt(head, "", 8, DIM)
+        self.state_lbl.pack(anchor="w", pady=(4, 0))
         if error:
-            self.state_lbl.config(text=f"●  агент не запущен: {error}", foreground=DANGER)
+            self.state_lbl.config(text=f"●  агент не запущен: {error}", fg=DANGER)
         else:
-            self.state_lbl.config(text=f"●  агент работает · порт {agent.config()['port']}", foreground=ACCENT)
+            self.state_lbl.config(text=f"●  в сети · порт {agent.config()['port']}")
 
-        self.nb = nb = ttk.Notebook(self)
-        nb.pack(fill="both", expand=True, padx=16, pady=(10, 0))
-        self.sp_devices = []
-        self.sp_error = ""
-        self.conn = ConnectionTab(nb, self)
-        self.editor = MacroEditor(nb, self)
-        self.spotify_tab = SpotifyTab(nb, self)
-        self.settings = SettingsTab(nb, self)
-        nb.add(self.conn, text="  Подключение  ")
-        nb.add(self.editor, text="  Макросы  ")
-        nb.add(self.spotify_tab, text="  Spotify  ")
-        nb.add(self.settings, text="  Настройки  ")
+        self.nav = {}
+        for key, glyph, name in NAV:
+            row = tk.Frame(side, bg=BG, cursor="hand2")
+            row.pack(fill="x", pady=1)
+            bar = tk.Frame(row, bg=BG, width=2)
+            bar.pack(side="left", fill="y")
+            ic = txt(row, glyph, 11, DIM, F.icon)
+            ic.pack(side="left", padx=(26, 12), pady=9)
+            lb = txt(row, name, 10, DIM)
+            lb.pack(side="left")
+            for w in (row, ic, lb):
+                w.bind("<Button-1>", lambda e, k=key: self.show_page(k))
+                w.bind("<Enter>", lambda e, k=key: self._nav_hover(k, True))
+                w.bind("<Leave>", lambda e, k=key: self._nav_hover(k, False))
+            self.nav[key] = (bar, ic, lb)
+        txt(side, "v1.1", 8, FAINT).pack(side="bottom", anchor="w", padx=28, pady=24)
+
+        self.pages = {
+            "conn": ConnectionPage(self.body, self),
+            "macros": MacroEditor(self.body, self),
+            "spotify": SpotifyPage(self.body, self),
+            "settings": SettingsPage(self.body, self),
+        }
+        self.editor = self.pages["macros"]
+        self.spotify_tab = self.pages["spotify"]
+        self.current = None
+        self.show_page("conn")
 
         self.protocol("WM_DELETE_WINDOW", self.on_close)
         agent.ON_SHOW = lambda: self.events.put("show")
@@ -278,57 +458,33 @@ class App(tk.Tk):
         self.tray_hint_shown = False
         self.visible = not minimized
         threading.Thread(target=self._device_loop, daemon=True).start()
+        self.update_idletasks()
+        dark_title_bar(self)
         if minimized:
             self.withdraw()
+        self.bind_all("<Control-s>", lambda e: self.editor.save())
         self._pump()
 
-    def _style(self):
-        s = ttk.Style(self)
-        s.theme_use("clam")
-        s.configure(".", background=BG, foreground=TEXT, font=(FONT, 10), bordercolor=FIELD,
-                    lightcolor=FIELD, darkcolor=FIELD, troughcolor=SURFACE, focuscolor=ACCENT)
-        s.configure("TFrame", background=BG)
-        s.configure("Card.TFrame", background=SURFACE)
-        s.configure("TLabel", background=BG, foreground=TEXT)
-        s.configure("Dim.TLabel", background=BG, foreground=DIM)
-        s.configure("CardDim.TLabel", background=SURFACE, foreground=DIM)
-        s.configure("Card.TLabel", background=SURFACE, foreground=TEXT)
-        s.configure("Big.TLabel", background=SURFACE, foreground=TEXT, font=("Consolas", 26))
-        s.configure("Title.TLabel", background=BG, foreground=TEXT, font=(FONT, 20))
-        s.configure("Section.TLabel", background=BG, foreground=ACCENT, font=(FONT, 9, "bold"))
-        s.configure("CardSection.TLabel", background=SURFACE, foreground=ACCENT, font=(FONT, 9, "bold"))
-        s.configure("TNotebook", background=BG, borderwidth=0, bordercolor=BG, lightcolor=BG,
-                    darkcolor=BG, tabmargins=(6, 4, 6, 0))
-        s.configure("TNotebook.Tab", background=BG, foreground=DIM, padding=(14, 8), borderwidth=0,
-                    bordercolor=BG, lightcolor=BG, darkcolor=BG, font=(FONT, 11))
-        s.map("TNotebook.Tab", background=[("selected", FIELD), ("active", SURFACE)],
-              foreground=[("selected", TEXT)], lightcolor=[("selected", FIELD)],
-              bordercolor=[("selected", FIELD)], expand=[("selected", (0, 0, 0, 0))])
-        s.configure("TEntry", fieldbackground=FIELD, foreground=TEXT, insertcolor=TEXT, padding=6)
-        s.configure("TSpinbox", fieldbackground=FIELD, foreground=TEXT, arrowcolor=DIM, padding=4)
-        s.configure("TCombobox", fieldbackground=FIELD, background=FIELD, foreground=TEXT,
-                    arrowcolor=DIM, padding=5, insertcolor=TEXT)
-        s.map("TCombobox", fieldbackground=[("readonly", FIELD)], foreground=[("readonly", TEXT)],
-              selectbackground=[("readonly", FIELD)], selectforeground=[("readonly", TEXT)])
-        s.configure("TButton", background=FIELD, foreground=TEXT, padding=(12, 6), borderwidth=0)
-        s.map("TButton", background=[("active", "#3A2E28"), ("pressed", "#3A2E28")])
-        s.configure("Accent.TButton", background=ACCENT, foreground=BG, font=(FONT, 10, "bold"))
-        s.map("Accent.TButton", background=[("active", "#D8B690"), ("pressed", "#B08A66")])
-        s.configure("Ghost.TButton", background=BG, foreground=DIM, padding=(6, 4))
-        s.map("Ghost.TButton", background=[("active", SURFACE)], foreground=[("active", DANGER)])
-        s.configure("TCheckbutton", background=BG, foreground=TEXT, indicatorbackground=FIELD,
-                    indicatorforeground=ACCENT)
-        s.map("TCheckbutton", background=[("active", BG)], indicatorbackground=[("selected", FIELD)])
-        self.option_add("*TCombobox*Listbox.background", SURFACE)
-        self.option_add("*TCombobox*Listbox.foreground", TEXT)
-        self.option_add("*TCombobox*Listbox.selectBackground", ACCENT)
-        self.option_add("*TCombobox*Listbox.selectForeground", BG)
-        self.option_add("*TCombobox*Listbox.font", (FONT, 10))
-        self.option_add("*Menu.background", SURFACE)
-        self.option_add("*Menu.foreground", TEXT)
-        self.option_add("*Menu.activeBackground", ACCENT)
-        self.option_add("*Menu.activeForeground", BG)
-        self.option_add("*Menu.font", (FONT, 10))
+    # ---------------------------------------------------------- navigation
+
+    def show_page(self, key):
+        if key == self.current:
+            return
+        if self.current:
+            self.pages[self.current].pack_forget()
+        self.current = key
+        self.pages[key].pack(fill="both", expand=True, padx=(44, 40), pady=(34, 24))
+        for k, (bar, ic, lb) in self.nav.items():
+            on = k == key
+            bar.config(bg=ACCENT if on else BG)
+            ic.config(fg=ACCENT if on else DIM)
+            lb.config(fg=TEXT if on else DIM)
+
+    def _nav_hover(self, key, inside):
+        if key != self.current:
+            _, ic, lb = self.nav[key]
+            lb.config(fg=TEXT if inside else DIM)
+            ic.config(fg=TEXT if inside else DIM)
 
     # ---------------------------------------------------------- tray
 
@@ -370,7 +526,7 @@ class App(tk.Tk):
     # ---------------------------------------------------------- spotify devices
 
     def _device_loop(self):
-        """Keeps the Spotify device list fresh for the tab and the tray menu."""
+        """Keeps the Spotify device list fresh for the page and the tray menu."""
         while True:
             self.fetch_devices()
             time.sleep(8 if self.visible else 30)
@@ -394,6 +550,8 @@ class App(tk.Tk):
             except spotify.SpotifyError as e:
                 self.events.put(("devices", self.sp_devices, str(e)))
         threading.Thread(target=work, daemon=True).start()
+
+    # ---------------------------------------------------------- lifecycle
 
     def _pump(self):
         try:
@@ -419,6 +577,7 @@ class App(tk.Tk):
 
     def on_close(self):
         if agent.config().get("tray_on_close", True):
+            self.editor.save(quiet=True)
             self.withdraw()
             self.visible = False
             if not self.tray_hint_shown:
@@ -443,84 +602,83 @@ class App(tk.Tk):
         self.destroy()
 
 
-# ================================================================ connection tab
+# ================================================================ connection page
 
-class ConnectionTab(ttk.Frame):
+class ConnectionPage(tk.Frame):
     def __init__(self, parent, app):
-        super().__init__(parent, padding=(8, 16, 8, 8))
+        super().__init__(parent, bg=BG)
         self.app = app
-        self.columnconfigure(0, weight=1)
-        self.columnconfigure(1, weight=1)
 
-        ipc = ttk.Frame(self, style="Card.TFrame", padding=18)
-        ipc.grid(row=0, column=0, sticky="nsew", padx=(0, 8))
-        label(ipc, "IP-АДРЕС НОУТБУКА", "CardSection.TLabel").pack(anchor="w")
-        self.ip_lbl = label(ipc, "", "Big.TLabel")
-        self.ip_lbl.pack(anchor="w", pady=(6, 0))
-        self.ip_other = label(ipc, "", "CardDim.TLabel")
-        self.ip_other.pack(anchor="w", pady=(2, 8))
-        ttk.Button(ipc, text="Копировать", command=lambda: self._copy(self.ip_lbl.cget("text"))).pack(anchor="w")
+        top = tk.Frame(self, bg=BG)
+        top.pack(fill="x")
+        ipc = tk.Frame(top, bg=BG)
+        ipc.pack(side="left", fill="x", expand=True)
+        caption(ipc, "IP ноутбука").pack(anchor="w")
+        self.ip_lbl = link(ipc, "", lambda: self._copy(self.ip_lbl.cget("text"), "IP"), TEXT, ACCENT, 34, F.display)
+        self.ip_lbl.pack(anchor="w", pady=(2, 0))
+        self.ip_other = txt(ipc, "", 8, FAINT)
+        self.ip_other.pack(anchor="w")
 
-        tkc = ttk.Frame(self, style="Card.TFrame", padding=18)
-        tkc.grid(row=0, column=1, sticky="nsew", padx=(8, 0))
-        label(tkc, "ТОКЕН", "CardSection.TLabel").pack(anchor="w")
-        self.token_lbl = label(tkc, "", "Big.TLabel")
-        self.token_lbl.pack(anchor="w", pady=(6, 0))
-        self.port_lbl = label(tkc, "", "CardDim.TLabel")
-        self.port_lbl.pack(anchor="w", pady=(2, 8))
-        row = ttk.Frame(tkc, style="Card.TFrame")
-        row.pack(anchor="w")
-        ttk.Button(row, text="Копировать", command=lambda: self._copy(self.token_lbl.cget("text"))).pack(side="left")
-        ttk.Button(row, text="Новый токен", command=self._new_token).pack(side="left", padx=8)
+        tkc = tk.Frame(top, bg=BG)
+        tkc.pack(side="left", fill="x", expand=True)
+        caption(tkc, "Токен").pack(anchor="w")
+        self.token_lbl = link(tkc, "", lambda: self._copy(self.token_lbl.cget("text"), "токен"), TEXT, ACCENT, 34,
+                              F.display)
+        self.token_lbl.pack(anchor="w", pady=(2, 0))
+        link(tkc, "новый токен", self._new_token, FAINT, DIM, 8).pack(anchor="w")
 
-        how = ttk.Frame(self, padding=(4, 18, 4, 0))
-        how.grid(row=1, column=0, columnspan=2, sticky="ew")
-        label(how, "КАК ПОДКЛЮЧИТЬ ТЕЛЕФОН", "Section.TLabel").pack(anchor="w")
-        label(how, "1.  Телефон и ноутбук в одной Wi-Fi сети.\n"
-                   "2.  DeskDash на телефоне → ⋮ → Настройки → «Найти ПК в сети» (или впиши IP вручную).\n"
-                   "3.  Введи токен и нажми «Проверить соединение». Кнопки-макросы появятся на экране.",
-              justify="left").pack(anchor="w", pady=(6, 0))
-        fw = ttk.Frame(how)
-        fw.pack(anchor="w", pady=(10, 0))
-        ttk.Button(fw, text="Разрешить в брандмауэре", command=self._firewall).pack(side="left")
-        ttk.Button(fw, text="Сделать сеть частной", command=lambda: os.startfile("ms-settings:network-status")).pack(side="left", padx=8)
-        label(fw, "если телефон не находит ноутбук", "Dim.TLabel").pack(side="left", padx=6)
+        self.hint = txt(self, "нажми на адрес или токен, чтобы скопировать", 9, FAINT)
+        self.hint.pack(anchor="w", pady=(18, 0))
 
-        bottom = ttk.Frame(self, padding=(4, 18, 4, 0))
-        bottom.grid(row=2, column=0, columnspan=2, sticky="nsew")
-        self.rowconfigure(2, weight=1)
-        bottom.columnconfigure(0, weight=1)
-        bottom.columnconfigure(1, weight=2)
-        label(bottom, "ТЕЛЕФОНЫ", "Section.TLabel").grid(row=0, column=0, sticky="w")
-        label(bottom, "ЖУРНАЛ", "Section.TLabel").grid(row=0, column=1, sticky="w", padx=(16, 0))
-        self.clients_lbl = label(bottom, "", justify="left")
-        self.clients_lbl.grid(row=1, column=0, sticky="nw", pady=(6, 0))
-        self.log_lbl = label(bottom, "", "Dim.TLabel", justify="left", font=("Consolas", 9))
-        self.log_lbl.grid(row=1, column=1, sticky="nw", padx=(16, 0), pady=(6, 0))
+        caption(self, "Телефоны").pack(anchor="w", pady=(38, 8))
+        self.clients = tk.Frame(self, bg=BG)
+        self.clients.pack(fill="x")
+
+        caption(self, "Если телефон не видит ноутбук").pack(anchor="w", pady=(34, 8))
+        fix = tk.Frame(self, bg=BG)
+        fix.pack(anchor="w")
+        link(fix, "разрешить в брандмауэре", self._firewall).pack(side="left")
+        txt(fix, "   ·   ", 10, FAINT).pack(side="left")
+        link(fix, "сделать сеть частной", lambda: os.startfile("ms-settings:network-status")).pack(side="left")
+
+        self.log_lbl = txt(self, "", 8, FAINT, F.mono, justify="left", anchor="w")
+        self.log_lbl.pack(side="bottom", anchor="w", fill="x")
         self._refresh()
 
     def _refresh(self):
         cfg = agent.config()
         ips = rank_ips(agent.local_ips())
         main = ips[0] if ips else "?"
-        self.ip_lbl.config(text=main)
+        if self.ip_lbl.cget("text") != main:
+            self.ip_lbl.config(text=main)
         others = [i for i in ips if i != main]
-        self.ip_other.config(text=("также: " + ", ".join(others)) if others else "")
-        self.token_lbl.config(text=cfg["token"])
-        self.port_lbl.config(text=f"порт {cfg['port']} · имя «{cfg['name']}»")
-        lines = []
-        for ip, (t, ok) in sorted(agent.CLIENTS.items(), key=lambda kv: -kv[1][0]):
+        self.ip_other.config(text=("также " + ",  ".join(others)) if others else "")
+        if self.token_lbl.cget("text") != cfg["token"]:
+            self.token_lbl.config(text=cfg["token"])
+
+        for w in self.clients.winfo_children():
+            w.destroy()
+        rows = sorted(agent.CLIENTS.items(), key=lambda kv: -kv[1][0])
+        for ip, (t, ok) in rows:
             fresh = time.time() - t < 15
+            r = tk.Frame(self.clients, bg=BG)
+            r.pack(anchor="w", pady=2)
+            txt(r, "●" if fresh and ok else "○", 9, ACCENT if fresh and ok else (DANGER if not ok else FAINT)).pack(
+                side="left")
+            txt(r, ip, 11, TEXT if ok else DIM).pack(side="left", padx=(12, 16))
             state = ("на связи" if fresh else "был " + ago(t)) if ok else "неверный токен"
-            lines.append(f"{'●' if fresh and ok else '○'}  {ip} — {state}")
-        self.clients_lbl.config(text="\n".join(lines) or "Пока никто не подключался",
-                                foreground=TEXT if lines else DIM)
-        self.log_lbl.config(text="\n".join(list(agent.LOG)[-9:]))
+            txt(r, state, 9, DIM).pack(side="left")
+        if not rows:
+            txt(self.clients, "Пока никто не подключался.  На телефоне:  ⋮  →  Настройки  →  Найти ПК в сети",
+                10, DIM).pack(anchor="w")
+        self.log_lbl.config(text="\n".join(list(agent.LOG)[-4:]))
         self.after(2000, self._refresh)
 
-    def _copy(self, text):
+    def _copy(self, text, what):
         self.clipboard_clear()
         self.clipboard_append(text)
+        self.hint.config(text=f"{what} скопирован", fg=ACCENT)
+        self.after(1800, lambda: self.hint.config(text="нажми на адрес или токен, чтобы скопировать", fg=FAINT))
 
     def _new_token(self):
         if messagebox.askyesno("Новый токен", "Сгенерировать новый токен? На телефоне его нужно будет ввести заново.",
@@ -538,64 +696,131 @@ class ConnectionTab(ttk.Frame):
         agent.log("правила брандмауэра добавлены" if r > 32 else "брандмауэр: отменено")
 
 
-# ================================================================ spotify tab
+# ================================================================ settings page
 
-DEVICE_GLYPH = {"Computer": "💻", "Smartphone": "📱", "Tablet": "📱", "Speaker": "🔊", "TV": "📺",
-                "CastVideo": "📺", "CastAudio": "🔊", "AVR": "🔊", "STB": "📺", "GameConsole": "🎮",
-                "Automobile": "🚗"}
-DEVICE_RU = {"Computer": "Компьютер", "Smartphone": "Телефон", "Tablet": "Планшет", "Speaker": "Колонка",
-             "TV": "Телевизор", "CastVideo": "Chromecast", "CastAudio": "Chromecast", "AVR": "Ресивер",
-             "GameConsole": "Консоль", "Automobile": "Автомобиль"}
-
-
-class SpotifyTab(ttk.Frame):
+class SettingsPage(tk.Frame):
     def __init__(self, parent, app):
-        super().__init__(parent, padding=(8, 16, 8, 8))
+        super().__init__(parent, bg=BG)
+        self.app = app
+        cfg = agent.config()
+        self.name_var = tk.StringVar(value=cfg.get("name", ""))
+        self.port_var = tk.StringVar(value=str(cfg.get("port", 8765)))
+        self.mac_var = tk.StringVar(value=cfg.get("mac", ""))
+
+        txt(self, "Настройки", 20, TEXT, F.display).pack(anchor="w", pady=(0, 28))
+        grid = tk.Frame(self, bg=BG)
+        grid.pack(fill="x")
+        grid.columnconfigure(2, weight=1)
+
+        def row(r, title, widget_factory, hint=""):
+            txt(grid, title, 10, DIM).grid(row=r, column=0, sticky="nw", pady=(0, 22), padx=(0, 36))
+            w = widget_factory(grid)
+            w.grid(row=r, column=1, sticky="w", pady=(0, 22))
+            if hint:
+                txt(grid, hint, 8, FAINT).grid(row=r, column=2, sticky="nw", padx=(18, 0), pady=(3, 0))
+
+        row(0, "Имя на телефоне", lambda p: Field(p, self.name_var, 11, width=28, on_commit=self.save))
+        row(1, "Порт", lambda p: Field(p, self.port_var, 11, width=8, on_commit=self.save),
+            "применится после перезапуска")
+        row(2, "MAC для пробуждения", lambda p: Field(p, self.mac_var, 11, F.mono, width=20, on_commit=self.save),
+            f"пусто — {agent.default_mac()}")
+        row(3, "Автозапуск", lambda p: Toggle(p, "вместе с Windows, свёрнутым в трей", get_autostart(),
+                                              self._autostart))
+        row(4, "Кнопка «закрыть»", lambda p: Toggle(p, "сворачивает в трей", cfg.get("tray_on_close", True),
+                                                    lambda v: self._set("tray_on_close", v)))
+
+        link(self, "открыть папку с настройками", lambda: os.startfile(agent.DATA_DIR), FAINT, DIM, 9).pack(
+            anchor="w", pady=(10, 0))
+        self.status = txt(self, "", 9, DIM)
+        self.status.pack(side="bottom", anchor="w")
+
+    def _say(self, msg, error=False):
+        self.status.config(text=msg, fg=DANGER if error else DIM)
+        if not error:
+            self.after(1800, lambda: self.status.config(text=""))
+
+    def _set(self, key, value):
+        edit_config(lambda c: c.__setitem__(key, value))
+        self._say("сохранено")
+
+    def _autostart(self, on):
+        try:
+            set_autostart(on)
+            self._say("сохранено")
+        except OSError as e:
+            self._say(f"автозапуск: {e}", True)
+
+    def save(self):
+        cfg = agent.config()
+        try:
+            port = int(self.port_var.get())
+            assert 1024 <= port <= 65535
+        except (ValueError, AssertionError):
+            self._say("порт — число от 1024 до 65535", True)
+            return
+        name = self.name_var.get().strip() or cfg["name"]
+        mac = self.mac_var.get().strip()
+        if (name, port, mac) == (cfg["name"], cfg["port"], cfg.get("mac", "")):
+            return
+
+        def upd(c):
+            c["name"], c["port"], c["mac"] = name, port, mac
+
+        edit_config(upd)
+        self._say("сохранено" + (" · порт изменится после перезапуска" if port != cfg["port"] else ""))
+
+
+# ================================================================ spotify page
+
+class SpotifyPage(tk.Frame):
+    def __init__(self, parent, app):
+        super().__init__(parent, bg=BG)
         self.app = app
         self.logged = None
         self.cid_var = tk.StringVar(value=agent.config().get("spotify", {}).get("client_id", ""))
 
-        head = ttk.Frame(self, style="Card.TFrame", padding=18)
-        head.pack(fill="x")
-        self.state_lbl = label(head, "", "Card.TLabel", font=(FONT, 14))
-        self.state_lbl.pack(side="left")
-        self.logout_btn = ttk.Button(head, text="Выйти", command=self._logout)
-        label(head, "выбор устройства на телефоне, в трее и здесь", "CardDim.TLabel").pack(side="right", padx=12)
+        head = tk.Frame(self, bg=BG)
+        head.pack(fill="x", pady=(0, 28))
+        self.title_lbl = txt(head, "Spotify", 20, TEXT, F.display)
+        self.title_lbl.pack(side="left")
+        self.logout = link(head, "выйти", self._logout, FAINT, DIM, 9)
 
-        # setup (shown until logged in)
-        self.setup = ttk.Frame(self, padding=(4, 18, 4, 0))
-        label(self.setup, "ПОДКЛЮЧЕНИЕ · ОДИН РАЗ", "Section.TLabel").grid(row=0, column=0, columnspan=3, sticky="w")
-        label(self.setup, "1.  Создай приложение в панели разработчика Spotify (Create app, бесплатно).").grid(
-            row=1, column=0, sticky="w", pady=(10, 0))
-        ttk.Button(self.setup, text="Открыть панель Spotify",
-                   command=lambda: os.startfile(spotify.DASHBOARD_URL)).grid(row=1, column=1, sticky="w", padx=10, pady=(10, 0))
-        label(self.setup, "2.  В «Redirect URIs» вставь адрес ниже, в «APIs used» отметь Web API и сохрани.").grid(
-            row=2, column=0, columnspan=3, sticky="w", pady=(14, 4))
-        self.redirect_lbl = label(self.setup, "", font=("Consolas", 11))
-        self.redirect_lbl.grid(row=3, column=0, sticky="w", padx=(22, 0))
-        ttk.Button(self.setup, text="Копировать", command=self._copy_redirect).grid(row=3, column=1, sticky="w", padx=10)
-        label(self.setup, "3.  Скопируй оттуда Client ID сюда и войди.").grid(
-            row=4, column=0, columnspan=3, sticky="w", pady=(14, 4))
-        row = ttk.Frame(self.setup)
-        row.grid(row=5, column=0, columnspan=3, sticky="w", padx=(22, 0))
-        ttk.Entry(row, textvariable=self.cid_var, width=40, font=("Consolas", 10)).pack(side="left")
-        ttk.Button(row, text="Войти через браузер", style="Accent.TButton", command=self._login).pack(side="left", padx=10)
-        label(self.setup, "Переключать устройства Spotify разрешает только с Premium.", "Dim.TLabel").grid(
-            row=6, column=0, columnspan=3, sticky="w", pady=(14, 0))
+        # setup, shown until logged in
+        self.setup = tk.Frame(self, bg=BG)
+        txt(self.setup, "Выбирай, где играет музыка: здесь, в трее и на телефоне. Нужен Spotify Premium.",
+            10, DIM).pack(anchor="w", pady=(0, 26))
 
-        # devices (shown when logged in)
-        self.devs = ttk.Frame(self, padding=(4, 18, 4, 0))
-        dh = ttk.Frame(self.devs)
-        dh.pack(fill="x")
-        label(dh, "ГДЕ ИГРАЕТ МУЗЫКА", "Section.TLabel").pack(side="left")
-        ttk.Button(dh, text="Обновить", style="Ghost.TButton", command=self._refresh_now).pack(side="right")
-        self.dev_list = ttk.Frame(self.devs)
-        self.dev_list.pack(fill="x", pady=(8, 0))
-        self.err_lbl = label(self.devs, "", "Dim.TLabel", wraplength=800, justify="left")
-        self.err_lbl.pack(anchor="w", pady=(10, 0))
+        def step(n, text):
+            r = tk.Frame(self.setup, bg=BG)
+            r.pack(anchor="w", fill="x", pady=(0, 6))
+            txt(r, n, 10, FAINT).pack(side="left", padx=(0, 14))
+            txt(r, text, 10, TEXT).pack(side="left")
+            return r
 
-        self.msg = label(self, "", "Dim.TLabel")
-        self.msg.pack(side="bottom", anchor="w", padx=4)
+        s1 = step("1", "Создай приложение в панели разработчика Spotify")
+        link(s1, "открыть панель  →", lambda: os.startfile(spotify.DASHBOARD_URL), ACCENT, TEXT).pack(
+            side="left", padx=(14, 0))
+        step("2", "В Redirect URIs добавь этот адрес, отметь Web API")
+        r2 = tk.Frame(self.setup, bg=BG)
+        r2.pack(anchor="w", pady=(2, 18), padx=(26, 0))
+        self.redirect = txt(r2, "", 10, DIM, F.mono)
+        self.redirect.pack(side="left")
+        self.copy_lbl = link(r2, "копировать", self._copy_redirect, FAINT, DIM, 9)
+        self.copy_lbl.pack(side="left", padx=(14, 0))
+        step("3", "Вставь Client ID и войди")
+        r3 = tk.Frame(self.setup, bg=BG)
+        r3.pack(anchor="w", pady=(6, 0), padx=(26, 0))
+        Field(r3, self.cid_var, 11, F.mono, width=34).pack(side="left")
+        link(r3, "войти через браузер  →", self._login, ACCENT, TEXT).pack(side="left", padx=(22, 0))
+
+        # devices, shown when logged in
+        self.devs = tk.Frame(self, bg=BG)
+        caption(self.devs, "Где играть").pack(anchor="w", pady=(0, 10))
+        self.dev_list = tk.Frame(self.devs, bg=BG)
+        self.dev_list.pack(fill="x")
+
+        self.msg = txt(self, "", 9, DIM, wraplength=560, justify="left")
+        self.msg.pack(side="bottom", anchor="w")
         self._poll_status()
 
     def _poll_status(self):
@@ -605,60 +830,78 @@ class SpotifyTab(ttk.Frame):
             if self.logged:
                 self.setup.pack_forget()
                 self.devs.pack(fill="both", expand=True)
-                self.logout_btn.pack(side="left", padx=16)
-                self.state_lbl.config(text=f"●  Spotify: {st['user'] or 'подключён'}", foreground=ACCENT)
-                self._refresh_now()
+                self.title_lbl.config(text=f"Spotify  ·  {st['user'] or 'подключён'}")
+                self.logout.pack(side="left", padx=(18, 0), pady=(10, 0))
+                threading.Thread(target=self.app.fetch_devices, daemon=True).start()
             else:
                 self.devs.pack_forget()
                 self.setup.pack(fill="both", expand=True)
-                self.logout_btn.pack_forget()
-                self.state_lbl.config(text="○  Spotify не подключён", foreground=TEXT)
+                self.title_lbl.config(text="Spotify")
+                self.logout.pack_forget()
             self.app.refresh_tray()
-        self.redirect_lbl.config(text=spotify.redirect_uri())
+        self.redirect.config(text=spotify.redirect_uri())
         self.after(1500, self._poll_status)
 
     def render_devices(self):
         for w in self.dev_list.winfo_children():
             w.destroy()
         for d in self.app.sp_devices:
-            r = ttk.Frame(self.dev_list, style="Card.TFrame", padding=(14, 10))
-            r.pack(fill="x", pady=3)
-            label(r, DEVICE_GLYPH.get(d["type"], "🎵"), "Card.TLabel", font=(FONT, 16)).pack(side="left")
-            label(r, d["name"], "Card.TLabel", font=(FONT, 12)).pack(side="left", padx=12)
-            sub = "играет сейчас" if d["active"] else DEVICE_RU.get(d["type"], d["type"])
+            r = tk.Frame(self.dev_list, bg=BG, cursor="hand2")
+            r.pack(fill="x")
+            ic = txt(r, DEVICE_GLYPH.get(d["type"], ""), 13, ACCENT if d["active"] else DIM, F.icon)
+            ic.pack(side="left", padx=(10, 18), pady=12)
+            name = txt(r, d["name"], 12, TEXT)
+            name.pack(side="left")
+            sub = "играет" if d["active"] else DEVICE_RU.get(d["type"], d["type"])
             if d.get("volume") is not None:
-                sub += f" · громкость {d['volume']}%"
-            label(r, sub, "CardDim.TLabel").pack(side="left")
-            if d["active"]:
-                label(r, "●", "Card.TLabel", foreground=ACCENT).pack(side="right", padx=8)
-            else:
-                ttk.Button(r, text="Играть здесь", command=lambda i=d["id"]: self._transfer(i)).pack(side="right")
+                sub += f"  ·  {d['volume']}%"
+            info = txt(r, sub, 9, ACCENT if d["active"] else FAINT)
+            info.pack(side="left", padx=(14, 0))
+            tk.Frame(self.dev_list, bg=LINE, height=1).pack(fill="x")
+            if not d["active"]:
+                act = txt(r, "играть здесь", 9, BG)
+                act.pack(side="right", padx=10)
+                parts = (r, ic, name, info, act)
+
+                def enter(e, parts=parts, act=act):
+                    for p in parts:
+                        p.config(bg=HOVER)
+                    act.config(fg=DIM)
+
+                def leave(e, parts=parts, act=act):
+                    for p in parts:
+                        p.config(bg=BG)
+                    act.config(fg=BG)
+
+                for p in parts:
+                    p.bind("<Enter>", enter)
+                    p.bind("<Leave>", leave)
+                    p.bind("<Button-1>", lambda e, i=d["id"]: self._transfer(i))
         if not self.app.sp_devices and self.logged:
-            label(self.dev_list, "Устройств нет. Открой Spotify на телефоне, ноутбуке или колонке.",
-                  "Dim.TLabel").pack(anchor="w")
-        self.err_lbl.config(text=self.app.sp_error, foreground=DANGER if self.app.sp_error else DIM)
+            txt(self.dev_list, "Устройств нет. Открой Spotify на телефоне, ноутбуке или колонке.", 10, DIM).pack(
+                anchor="w")
+        if self.app.sp_error:
+            self.msg.config(text=self.app.sp_error, fg=DANGER)
 
     def _transfer(self, device_id):
-        self.msg.config(text="Переключаю…")
+        self.msg.config(text="переключаю…", fg=DIM)
         self.app.transfer(device_id)
         self.after(2500, lambda: self.msg.config(text=""))
-
-    def _refresh_now(self):
-        threading.Thread(target=self.app.fetch_devices, daemon=True).start()
 
     def _copy_redirect(self):
         self.clipboard_clear()
         self.clipboard_append(spotify.redirect_uri())
-        self.msg.config(text="Адрес скопирован")
+        self.copy_lbl.config(text="скопировано")
+        self.after(1600, lambda: self.copy_lbl.config(text="копировать"))
 
     def _login(self):
         cid = self.cid_var.get().strip()
         if not re.fullmatch(r"[0-9a-fA-F]{32}", cid):
-            self.msg.config(text="Client ID — это 32 символа из панели Spotify", foreground=DANGER)
+            self.msg.config(text="Client ID — это 32 символа из панели Spotify", fg=DANGER)
             return
         spotify.set_client_id(cid)
         os.startfile(spotify.login_url())
-        self.msg.config(text="Подтверди вход в открывшемся браузере…", foreground=DIM)
+        self.msg.config(text="подтверди вход в открывшемся браузере…", fg=DIM)
 
     def _logout(self):
         spotify.logout()
@@ -666,69 +909,11 @@ class SpotifyTab(ttk.Frame):
         self.render_devices()
 
 
-# ================================================================ settings tab
+# ================================================================ macro editor page
 
-class SettingsTab(ttk.Frame):
+class MacroEditor(tk.Frame):
     def __init__(self, parent, app):
-        super().__init__(parent, padding=(12, 18, 12, 12))
-        self.app = app
-        cfg = agent.config()
-        self.columnconfigure(2, weight=1)
-        self.name_var = tk.StringVar(value=cfg.get("name", ""))
-        self.port_var = tk.StringVar(value=str(cfg.get("port", 8765)))
-        self.mac_var = tk.StringVar(value=cfg.get("mac", ""))
-        self.auto_var = tk.BooleanVar(value=get_autostart())
-        self.tray_var = tk.BooleanVar(value=cfg.get("tray_on_close", True))
-
-        def field(r, title, var, hint):
-            label(self, title, "Section.TLabel").grid(row=r, column=0, sticky="w", pady=(0, 14), padx=(0, 18))
-            ttk.Entry(self, textvariable=var, width=36).grid(row=r, column=1, sticky="w", pady=(0, 14))
-            label(self, hint, "Dim.TLabel").grid(row=r, column=2, sticky="w", pady=(0, 14), padx=(12, 0))
-
-        field(0, "ИМЯ КОМПЬЮТЕРА", self.name_var, "так он называется на телефоне")
-        field(1, "ПОРТ", self.port_var, "после смены перезапусти DeskDash")
-        field(2, "MAC ДЛЯ ПРОБУЖДЕНИЯ", self.mac_var, f"пусто = {agent.default_mac()}")
-        ttk.Checkbutton(self, text="Запускать вместе с Windows (свёрнутым в трей)",
-                        variable=self.auto_var).grid(row=3, column=0, columnspan=3, sticky="w", pady=(4, 8))
-        ttk.Checkbutton(self, text="Кнопка «закрыть» сворачивает в трей, агент продолжает работать",
-                        variable=self.tray_var).grid(row=4, column=0, columnspan=3, sticky="w", pady=(0, 18))
-        btns = ttk.Frame(self)
-        btns.grid(row=5, column=0, columnspan=3, sticky="w")
-        ttk.Button(btns, text="Сохранить", style="Accent.TButton", command=self.save).pack(side="left")
-        ttk.Button(btns, text="Папка с настройками", command=lambda: os.startfile(agent.DATA_DIR)).pack(side="left", padx=8)
-        self.status = label(self, "", "Dim.TLabel")
-        self.status.grid(row=6, column=0, columnspan=3, sticky="w", pady=(14, 0))
-
-    def save(self):
-        try:
-            port = int(self.port_var.get())
-            assert 1024 <= port <= 65535
-        except (ValueError, AssertionError):
-            self.status.config(text="Порт: число от 1024 до 65535", foreground=DANGER)
-            return
-        old_port = agent.config()["port"]
-
-        def upd(c):
-            c["name"] = self.name_var.get().strip() or c["name"]
-            c["port"] = port
-            c["mac"] = self.mac_var.get().strip()
-            c["tray_on_close"] = bool(self.tray_var.get())
-
-        edit_config(upd)
-        try:
-            set_autostart(self.auto_var.get())
-        except OSError as e:
-            self.status.config(text=f"Автозапуск: {e}", foreground=DANGER)
-            return
-        msg = "Сохранено" + (". Порт изменится после перезапуска DeskDash" if port != old_port else "")
-        self.status.config(text=msg, foreground=DIM)
-
-
-# ================================================================ macro editor tab
-
-class MacroEditor(ttk.Frame):
-    def __init__(self, parent, app):
-        super().__init__(parent, padding=(8, 14, 8, 8))
+        super().__init__(parent, bg=BG)
         self.app = app
         self.macros = [normalize(m) for m in agent.config().get("macros", [])]
         self.saved = self._snapshot()
@@ -737,98 +922,109 @@ class MacroEditor(ttk.Frame):
         self.step_rows = []
         self.recording = None
         self.win_down = False
+        self.autosave_job = None
         self._build()
         self._fill_list()
         if self.macros:
             self._select(0)
 
-    def _build(self):
-        body = ttk.Frame(self)
-        body.pack(fill="both", expand=True)
-        left = ttk.Frame(body)
-        left.pack(side="left", fill="y")
-        self.listbox = tk.Listbox(left, width=26, bg=SURFACE, fg=TEXT, bd=0, highlightthickness=0,
-                                  selectbackground=ACCENT, selectforeground=BG, activestyle="none",
-                                  font=(FONT, 11), exportselection=False)
-        self.listbox.pack(fill="y", expand=True)
-        self.listbox.bind("<<ListboxSelect>>", self._on_list_select)
-        btns = ttk.Frame(left)
-        btns.pack(fill="x", pady=(8, 0))
-        self.add_btn = ttk.Button(btns, text="+ Добавить ▾", command=self._templates_menu)
-        self.add_btn.pack(side="left")
-        ttk.Button(btns, text="↑", width=3, command=lambda: self._move(-1)).pack(side="left", padx=(6, 0))
-        ttk.Button(btns, text="↓", width=3, command=lambda: self._move(1)).pack(side="left", padx=(4, 0))
-        ttk.Button(btns, text="Удалить", style="Ghost.TButton", command=self._remove).pack(side="right")
-        ttk.Button(btns, text="Копия", style="Ghost.TButton", command=self._duplicate).pack(side="right")
+    # ---------------------------------------------------------- layout
 
-        form = ttk.Frame(body, padding=(24, 0, 0, 0))
-        form.pack(side="left", fill="both", expand=True)
-        form.columnconfigure(1, weight=1)
+    def _build(self):
+        left = tk.Frame(self, bg=BG, width=210)
+        left.pack(side="left", fill="y")
+        left.pack_propagate(False)
+        caption(left, "Кнопки на телефоне").pack(anchor="w", pady=(6, 12))
+        self.list_area = Scroll(left)
+        self.list_area.pack(fill="both", expand=True)
+        self.add_lbl = link(left, "+  добавить", self._templates_menu, ACCENT, TEXT)
+        self.add_lbl.pack(anchor="w", pady=(12, 0))
+
+        tk.Frame(self, bg=LINE, width=1).pack(side="left", fill="y", padx=(0, 36))
+
+        self.form = tk.Frame(self, bg=BG)
+        self.form.pack(side="left", fill="both", expand=True)
+        tools = tk.Frame(self.form, bg=BG)
+        tools.pack(fill="x")
+        for text, cmd in (("удалить", self._remove), ("копия", self._duplicate), ("↓", lambda: self._move(1)),
+                          ("↑", lambda: self._move(-1))):
+            link(tools, text, cmd, FAINT, TEXT, 9).pack(side="right", padx=(14, 0))
+
         self.label_var = tk.StringVar()
         self.id_var = tk.StringVar()
-        self.icon_var = tk.StringVar()
-        self.confirm_var = tk.BooleanVar()
-        self.label_var.trace_add("write", lambda *_: self.commit())
+        self.label_var.trace_add("write", lambda *_: self._changed())
+        self.id_var.trace_add("write", lambda *_: self._changed())
 
-        label(form, "ПОДПИСЬ НА ТЕЛЕФОНЕ", "Section.TLabel").grid(row=0, column=0, sticky="w", pady=(0, 4))
-        self.label_entry = ttk.Entry(form, textvariable=self.label_var, font=(FONT, 12))
-        self.label_entry.grid(row=1, column=0, columnspan=2, sticky="ew")
-        label(form, "ИКОНКА", "Section.TLabel").grid(row=2, column=0, sticky="w", pady=(14, 4))
-        label(form, "ID", "Section.TLabel").grid(row=2, column=1, sticky="w", pady=(14, 4), padx=(12, 0))
-        icons = ttk.Combobox(form, textvariable=self.icon_var, state="readonly", width=16,
-                             values=[f"{g}  {n}" for n, g in ICON_GLYPH.items()])
-        icons.grid(row=3, column=0, sticky="w")
-        icons.bind("<<ComboboxSelected>>", lambda e: self.commit())
-        ttk.Entry(form, textvariable=self.id_var).grid(row=3, column=1, sticky="ew", padx=(12, 0))
-        ttk.Checkbutton(form, text="Спрашивать подтверждение (срабатывает по второму нажатию)",
-                        variable=self.confirm_var, command=self.commit).grid(row=4, column=0, columnspan=2,
-                                                                             sticky="w", pady=(12, 0))
-        head = ttk.Frame(form)
-        head.grid(row=5, column=0, columnspan=2, sticky="ew", pady=(18, 4))
-        label(head, "ДЕЙСТВИЯ ПО ПОРЯДКУ", "Section.TLabel").pack(side="left")
-        ttk.Button(head, text="+ шаг", style="Ghost.TButton", command=self._add_step).pack(side="right")
-        self.steps_frame = ttk.Frame(form)
-        self.steps_frame.grid(row=6, column=0, columnspan=2, sticky="new")
-        form.rowconfigure(6, weight=1)
-        label(form, "Сайт: адрес, например youtube.com · Настройки Windows: выбери раздел из списка\n"
-                    "Программа: команда или exe (кнопка «Обзор») · Клавиши: ctrl+shift+m, win+d, f5, "
-                    "media_play_pause", "Dim.TLabel", justify="left").grid(row=7, column=0, columnspan=2,
-                                                                         sticky="w", pady=(10, 0))
+        Field(self.form, self.label_var, 22, F.display).pack(fill="x", pady=(4, 18))
 
-        foot = ttk.Frame(self, padding=(0, 12, 0, 4))
-        foot.pack(fill="x")
-        self.status = label(foot, "", "Dim.TLabel")
+        meta = tk.Frame(self.form, bg=BG)
+        meta.pack(fill="x")
+        caption(meta, "Иконка").grid(row=0, column=0, sticky="w")
+        caption(meta, "ID").grid(row=0, column=1, sticky="w", padx=(40, 0))
+        icon_row = tk.Frame(meta, bg=BG, cursor="hand2")
+        icon_row.grid(row=1, column=0, sticky="w", pady=(6, 0))
+        self.icon_glyph = link(icon_row, "", self._pick_icon, ACCENT, TEXT, 12, F.icon)
+        self.icon_glyph.pack(side="left")
+        self.icon_lbl = link(icon_row, "", self._pick_icon, TEXT, ACCENT, 10)
+        self.icon_lbl.pack(side="left", padx=(10, 0))
+        Field(meta, self.id_var, 10, F.mono, width=18).grid(row=1, column=1, sticky="w", padx=(40, 0), pady=(6, 0))
+        self.confirm = Toggle(self.form, "срабатывает по второму нажатию", False, lambda v: self._changed())
+        self.confirm.pack(anchor="w", pady=(20, 0))
+
+        caption(self.form, "Действия по порядку").pack(anchor="w", pady=(30, 10))
+        self.steps_frame = tk.Frame(self.form, bg=BG)
+        self.steps_frame.pack(fill="x")
+        link(self.form, "+  шаг", self._add_step, FAINT, TEXT, 9).pack(anchor="w", pady=(10, 0))
+
+        foot = tk.Frame(self.form, bg=BG)
+        foot.pack(side="bottom", fill="x")
+        self.status = txt(foot, "", 9, DIM)
         self.status.pack(side="left")
-        ttk.Button(foot, text="Сохранить", style="Accent.TButton", command=self.save).pack(side="right")
-        ttk.Button(foot, text="▶  Проверить", command=self._test).pack(side="right", padx=8)
-        self.bind_all("<Control-s>", lambda e: self.save())
+        link(foot, "▶  проверить", self._test, ACCENT, TEXT).pack(side="right")
 
     # ---------------------------------------------------------- list
 
-    def _item_text(self, m):
-        return f"  {ICON_GLYPH.get(m['icon'], '⚡')}   {m['label'] or m['id'] or '(без названия)'}"
-
     def _fill_list(self):
-        self.listbox.delete(0, "end")
-        for m in self.macros:
-            self.listbox.insert("end", self._item_text(m))
+        for w in self.list_area.inner.winfo_children():
+            w.destroy()
+        self.rows = []
+        for i, m in enumerate(self.macros):
+            r = tk.Frame(self.list_area.inner, bg=BG, cursor="hand2")
+            r.pack(fill="x")
+            ic = txt(r, ICON_GLYPH.get(m["icon"], ICON_GLYPH["bolt"]), 10, FAINT, F.icon)
+            ic.pack(side="left", padx=(0, 14), pady=7)
+            lb = txt(r, m["label"] or m["id"] or "без названия", 10, DIM)
+            lb.pack(side="left")
+            for w in (r, ic, lb):
+                w.bind("<Button-1>", lambda e, i=i: self._on_pick(i))
+                w.bind("<Enter>", lambda e, i=i: self._hover(i, True))
+                w.bind("<Leave>", lambda e, i=i: self._hover(i, False))
+            self.rows.append((ic, lb))
+        self._paint_list()
 
-    def _on_list_select(self, _e):
-        sel = self.listbox.curselection()
-        if sel and sel[0] != self.cur:
+    def _paint_list(self):
+        for i, (ic, lb) in enumerate(self.rows):
+            on = i == self.cur
+            m = self.macros[i]
+            ic.config(text=ICON_GLYPH.get(m["icon"], ICON_GLYPH["bolt"]), fg=ACCENT if on else FAINT)
+            lb.config(text=m["label"] or m["id"] or "без названия", fg=TEXT if on else DIM)
+
+    def _hover(self, i, inside):
+        if i != self.cur and i < len(self.rows):
+            self.rows[i][1].config(fg=TEXT if inside else DIM)
+
+    def _on_pick(self, i):
+        if i != self.cur:
             self.commit()
-            self._select(sel[0])
+            self._select(i)
 
     def _select(self, i):
         if not self.macros:
             self.cur = None
             self._load_form()
             return
-        i = max(0, min(i, len(self.macros) - 1))
-        self.cur = i
-        self.listbox.selection_clear(0, "end")
-        self.listbox.selection_set(i)
-        self.listbox.see(i)
+        self.cur = max(0, min(i, len(self.macros) - 1))
+        self._paint_list()
         self._load_form()
 
     def _load_form(self):
@@ -836,17 +1032,31 @@ class MacroEditor(ttk.Frame):
         m = self.macros[self.cur] if self.cur is not None else None
         self.label_var.set(m["label"] if m else "")
         self.id_var.set(m["id"] if m else "")
-        self.icon_var.set(f"{ICON_GLYPH.get(m['icon'], '⚡')}  {m['icon']}" if m else "")
-        self.confirm_var.set(m["confirm"] if m else False)
+        self._paint_icon(m["icon"] if m else "bolt")
+        self.confirm.set(m["confirm"] if m else False)
         self.loading = False
         self._render_steps()
 
+    def _paint_icon(self, name):
+        self.icon_glyph.config(text=ICON_GLYPH.get(name, ICON_GLYPH["bolt"]))
+        self.icon_lbl.config(text=ICON_NAMES.get(name, name) + "  ▾")
+        self.icon_name = name
+
+    def _pick_icon(self):
+        if self.cur is None:
+            return
+        m = tk.Menu(self, tearoff=0, bg=HOVER, fg=TEXT, activebackground=LINE, activeforeground=TEXT, bd=0,
+                    font=(F.text, 10))
+        for name in ICON_GLYPH:
+            m.add_command(label=ICON_NAMES.get(name, name), command=lambda n=name: self._set_icon(n))
+        m.tk_popup(self.icon_lbl.winfo_rootx(), self.icon_lbl.winfo_rooty() + self.icon_lbl.winfo_height() + 2)
+
+    def _set_icon(self, name):
+        self._paint_icon(name)
+        self._changed()
+
     def _templates_menu(self):
-        menu = tk.Menu(self, tearoff=0)
-        for t in TEMPLATES:
-            menu.add_command(label=t[0], command=lambda t=t: self._add(t))
-        x, y = self.add_btn.winfo_rootx(), self.add_btn.winfo_rooty() + self.add_btn.winfo_height()
-        menu.tk_popup(x, y)
+        popup(self.add_lbl, [(t, t[0]) for t in TEMPLATES], self._add)
 
     def _add(self, tpl):
         self.commit()
@@ -859,8 +1069,7 @@ class MacroEditor(ttk.Frame):
                             "steps": [{"kind": k, "value": v, "repeat": 1} for k, v in steps]})
         self._fill_list()
         self._select(len(self.macros) - 1)
-        self.label_entry.focus_set()
-        self.label_entry.select_range(0, "end")
+        self._schedule_save()
 
     def _duplicate(self):
         if self.cur is None:
@@ -876,18 +1085,19 @@ class MacroEditor(ttk.Frame):
         self.macros.insert(self.cur + 1, m)
         self._fill_list()
         self._select(self.cur + 1)
-        self._say("Копия создана, не забудь сохранить")
+        self._schedule_save()
 
     def _remove(self):
         if self.cur is None:
             return
-        if not messagebox.askyesno("Удалить", f"Удалить макрос «{self.macros[self.cur]['label']}»?", parent=self):
+        if not messagebox.askyesno("Удалить", f"Удалить «{self.macros[self.cur]['label']}»?", parent=self):
             return
         self.macros.pop(self.cur)
         i = self.cur
         self.cur = None
         self._fill_list()
         self._select(i)
+        self._schedule_save()
 
     def _move(self, d):
         if self.cur is None:
@@ -898,6 +1108,7 @@ class MacroEditor(ttk.Frame):
             self.macros[self.cur], self.macros[j] = self.macros[j], self.macros[self.cur]
             self._fill_list()
             self._select(j)
+            self._schedule_save()
 
     # ---------------------------------------------------------- steps
 
@@ -909,56 +1120,70 @@ class MacroEditor(ttk.Frame):
             return
         for i, st in enumerate(self.macros[self.cur]["steps"]):
             k = st["kind"]
-            row = ttk.Frame(self.steps_frame)
-            row.pack(fill="x", pady=3)
-            kv = tk.StringVar(value=KIND_LABEL[k])
-            cb = ttk.Combobox(row, textvariable=kv, state="readonly", width=17, values=[l for _, l in KINDS])
-            cb.pack(side="left")
-            cb.bind("<<ComboboxSelected>>", lambda e: (self.commit(), self._render_steps()))
-            if k == "settings":
-                vv = tk.StringVar(value=SETTINGS_LABEL.get(st["value"], st["value"]))
-                val = ttk.Combobox(row, textvariable=vv, values=[n for n, _ in WIN_SETTINGS])
-                val.bind("<<ComboboxSelected>>", lambda e: self.commit())
-            elif k == "system":
-                vv = tk.StringVar(value=SYSTEM_LABEL.get(st["value"], "Заблокировать"))
-                val = ttk.Combobox(row, textvariable=vv, state="readonly", values=[n for _, n in SYSTEM])
-                val.bind("<<ComboboxSelected>>", lambda e: self.commit())
-            else:
-                vv = tk.StringVar(value=st["value"])
-                val = ttk.Entry(row, textvariable=vv)
-            val.pack(side="left", fill="x", expand=True, padx=6)
-            rv = tk.StringVar(value=str(st.get("repeat", 1)))
+            row = tk.Frame(self.steps_frame, bg=BG)
+            row.pack(fill="x", pady=5)
+            txt(row, str(i + 1), 9, FAINT).pack(side="left", padx=(0, 16))
+            kind_lbl = link(row, KIND_LABEL[k] + "  ▾", lambda: None, DIM, TEXT, 10)
+            kind_lbl.config(width=17, anchor="w")
+            kind_lbl.bind("<Button-1>", lambda e, i=i, w=kind_lbl: popup(w, KINDS, lambda v, i=i: self._set_kind(i, v)))
+            kind_lbl.pack(side="left")
+            var = tk.StringVar(value=st["value"])
+            rep = tk.StringVar(value=str(st.get("repeat", 1)))
+            # right-hand controls first, so the expanding value field can't squeeze them out
+            tk.Frame(row, bg=BG, width=12).pack(side="right")
+            link(row, "×", lambda i=i: self._remove_step(i), FAINT, DANGER, 12).pack(side="right", padx=(16, 0))
             if k == "keys":
-                ttk.Button(row, text="⌨ Записать", command=lambda v=vv: self._record(v)).pack(side="left")
-                label(row, "×", "Dim.TLabel").pack(side="left", padx=(8, 2))
-                ttk.Spinbox(row, from_=1, to=20, textvariable=rv, width=3).pack(side="left")
-            elif k == "run":
-                ttk.Button(row, text="Обзор…", command=lambda v=vv: self._browse(v, exe=True)).pack(side="left")
-            elif k == "file":
-                ttk.Button(row, text="Файл…", command=lambda v=vv: self._browse(v)).pack(side="left")
-                ttk.Button(row, text="Папка…", command=lambda v=vv: self._browse(v, folder=True)).pack(side="left", padx=(4, 0))
+                Field(row, rep, 10, F.mono, width=2, on_change=self._changed).pack(side="right")
+                txt(row, "×", 9, FAINT).pack(side="right", padx=(16, 4))
+                link(row, "записать", lambda v=var: self._record(v), FAINT, ACCENT, 9).pack(side="right", padx=(16, 0))
+            elif k in ("run", "file"):
+                link(row, "обзор", lambda v=var, x=k: self._browse(v, x), FAINT, ACCENT, 9).pack(side="right",
+                                                                                                padx=(16, 0))
             elif k == "site":
-                ttk.Button(row, text="Открыть", command=lambda v=vv: self._open_now(v)).pack(side="left")
-            ttk.Button(row, text="✕", width=3, style="Ghost.TButton",
-                       command=lambda i=i: self._remove_step(i)).pack(side="left", padx=(6, 0))
-            self.step_rows.append({"kind": kv, "value": vv, "repeat": rv})
+                link(row, "открыть", lambda v=var: self._open_now(v), FAINT, ACCENT, 9).pack(side="right",
+                                                                                            padx=(16, 0))
+            if k == "settings":
+                val = link(row, SETTINGS_LABEL.get(st["value"], st["value"]) + "  ▾", lambda: None, TEXT, ACCENT)
+                val.bind("<Button-1>", lambda e, i=i, w=val: popup(
+                    w, [(u, n) for n, u in WIN_SETTINGS], lambda v, i=i: self._set_value(i, v)))
+                val.pack(side="left", padx=(8, 0))
+            elif k == "system":
+                val = link(row, SYSTEM_LABEL.get(st["value"], "заблокировать") + "  ▾", lambda: None, TEXT, ACCENT)
+                val.bind("<Button-1>", lambda e, i=i, w=val: popup(w, SYSTEM, lambda v, i=i: self._set_value(i, v)))
+                val.pack(side="left", padx=(8, 0))
+            else:
+                font = F.mono if k in ("keys", "run", "file") else None
+                Field(row, var, 10, font, on_change=self._changed).pack(side="left", fill="x", expand=True, padx=(8, 0))
+            self.step_rows.append({"value": var, "repeat": rep})
 
-    def _browse(self, var, exe=False, folder=False):
-        if folder:
-            p = filedialog.askdirectory(parent=self)
-        elif exe:
+    def _set_kind(self, i, kind):
+        self.commit()
+        st = self.macros[self.cur]["steps"][i]
+        if st["kind"] != kind:
+            defaults = {"site": "https://", "settings": "ms-settings:sound", "system": "lock", "wait": "500"}
+            st.update(kind=kind, value=defaults.get(kind, ""), repeat=1)
+        self._render_steps()
+        self._changed()
+
+    def _set_value(self, i, value):
+        self.commit()
+        self.macros[self.cur]["steps"][i]["value"] = value
+        self._render_steps()
+        self._changed()
+
+    def _browse(self, var, kind):
+        if kind == "run":
             p = filedialog.askopenfilename(parent=self, filetypes=[("Программы", "*.exe *.bat *.lnk"), ("Все файлы", "*.*")])
+            if p:
+                var.set(f'"{os.path.normpath(p)}"')
         else:
-            p = filedialog.askopenfilename(parent=self)
-        if p:
-            p = os.path.normpath(p)
-            var.set(f'"{p}"' if exe else p)
-            self.commit()
+            p = filedialog.askopenfilename(parent=self) or filedialog.askdirectory(parent=self)
+            if p:
+                var.set(os.path.normpath(p))
 
     def _open_now(self, var):
-        self.commit()
         v = to_cfg_step({"kind": "site", "value": var.get()})["open"]
-        if v:
+        if v and v.lower() not in ("https://", "http://"):
             os.startfile(v)
 
     def _add_step(self):
@@ -967,6 +1192,7 @@ class MacroEditor(ttk.Frame):
         self.commit()
         self.macros[self.cur]["steps"].append({"kind": "keys", "value": "", "repeat": 1})
         self._render_steps()
+        self._changed()
 
     def _remove_step(self, i):
         self.commit()
@@ -975,11 +1201,12 @@ class MacroEditor(ttk.Frame):
         if not steps:
             steps.append({"kind": "keys", "value": "", "repeat": 1})
         self._render_steps()
+        self._changed()
 
     def _record(self, var):
         self.recording = var
         self.win_down = False
-        self._say("Нажми сочетание клавиш… (Esc — отмена)")
+        self._say("нажми сочетание клавиш…  (esc — отмена)")
         self.bind_all("<KeyPress>", self._on_key)
         self.bind_all("<KeyRelease>", self._on_key_up)
 
@@ -1004,7 +1231,7 @@ class MacroEditor(ttk.Frame):
             mods.append("win")
         ks = e.keysym
         if ks == "Escape" and not mods:
-            self._stop_record("Запись отменена")
+            self._stop_record("запись отменена")
             return "break"
         if ks in KEYSYM_NAMES:
             key = KEYSYM_NAMES[ks]
@@ -1016,7 +1243,7 @@ class MacroEditor(ttk.Frame):
             return "break"
         combo = "+".join(mods + [key])
         self.recording.set(combo)
-        self._stop_record(f"Записано: {combo}")
+        self._stop_record(f"записано: {combo}")
         return "break"
 
     def _stop_record(self, msg):
@@ -1024,10 +1251,10 @@ class MacroEditor(ttk.Frame):
         self.unbind_all("<KeyRelease>")
         self.bind_all("<Control-s>", lambda e: self.save())
         self.recording = None
-        self.commit()
         self._say(msg)
+        self._changed()
 
-    # ---------------------------------------------------------- model
+    # ---------------------------------------------------------- model & autosave
 
     def commit(self):
         if self.loading or self.cur is None:
@@ -1035,66 +1262,61 @@ class MacroEditor(ttk.Frame):
         m = self.macros[self.cur]
         m["label"] = self.label_var.get().strip()
         m["id"] = self.id_var.get().strip()
-        icon = self.icon_var.get().split()
-        m["icon"] = icon[-1] if icon else "bolt"
-        m["confirm"] = bool(self.confirm_var.get())
-        steps = []
-        for r in self.step_rows:
-            k = LABEL_KIND.get(r["kind"].get(), "keys")
-            v = r["value"].get().strip()
-            if k == "settings":
-                v = LABEL_SETTINGS.get(v, v)
-                if not v.startswith("ms-settings:"):
-                    v = "ms-settings:sound"
-            elif k == "system":
-                v = LABEL_SYSTEM.get(v, v if v in SYSTEM_LABEL else "lock")
-            elif k == "site" and not v:
-                v = "https://"
+        m["icon"] = getattr(self, "icon_name", m["icon"])
+        m["confirm"] = self.confirm.value
+        for st, r in zip(m["steps"], self.step_rows):
+            if st["kind"] not in ("settings", "system"):
+                st["value"] = r["value"].get().strip()
             try:
-                rep = max(1, min(50, int(r["repeat"].get())))
+                st["repeat"] = max(1, min(50, int(r["repeat"].get())))
             except ValueError:
-                rep = 1
-            steps.append({"kind": k, "value": v, "repeat": rep})
-        if steps:
-            m["steps"] = steps
-        text = self._item_text(m)
-        if self.listbox.get(self.cur) != text:
-            self.listbox.delete(self.cur)
-            self.listbox.insert(self.cur, text)
-            self.listbox.selection_set(self.cur)
+                st["repeat"] = 1
+
+    def _changed(self):
+        if self.loading:
+            return
+        self.commit()
+        self._paint_list()
+        self._schedule_save()
+
+    def _schedule_save(self):
+        if self.autosave_job:
+            self.after_cancel(self.autosave_job)
+        self.autosave_job = self.after(700, lambda: self.save(auto=True))
 
     def _snapshot(self):
         return json.dumps([denormalize(m) for m in self.macros], ensure_ascii=False, sort_keys=True)
 
-    def save(self):
+    def save(self, quiet=False, auto=False):
+        """Validates and writes config.json. Autosave reports problems quietly, explicit saves in red."""
+        self.autosave_job = None
         self.commit()
-        for m in self.macros:
-            err = validate(m)
-            if err:
-                self._say(err, error=True)
-                return False
         ids = [m["id"] for m in self.macros]
         dup = next((i for i in ids if ids.count(i) > 1), None)
-        if dup:
-            self._say(f"ID «{dup}» повторяется", error=True)
+        err = next((e for e in map(validate, self.macros) if e), None) or (dup and f"ID «{dup}» повторяется")
+        if err:
+            if auto:
+                self._say("не сохранено: " + err)
+            elif not quiet:
+                self._say(err, error=True)
             return False
-        macros = [denormalize(m) for m in self.macros]
-        edit_config(lambda c: c.__setitem__("macros", macros))
-        self.saved = self._snapshot()
-        self.app.refresh_tray()
-        self._say("Сохранено. Телефон обновит кнопки в течение минуты")
+        snap = self._snapshot()
+        if snap != self.saved:
+            macros = [denormalize(m) for m in self.macros]
+            edit_config(lambda c: c.__setitem__("macros", macros))
+            self.saved = snap
+            self.app.refresh_tray()
+            if not quiet:
+                self._say("сохранено · телефон обновит кнопки в течение минуты")
         return True
 
     def confirm_discard(self):
         """True when it is fine to exit (saved, or the user chose what to do)."""
-        self.commit()
-        if self._snapshot() == self.saved:
+        if self.save(quiet=True) or self._snapshot() == self.saved:
             return True
         self.app.show()
-        ans = messagebox.askyesnocancel("Сохранить?", "Есть несохранённые изменения в макросах. Сохранить?", parent=self)
-        if ans is None:
-            return False
-        return self.save() if ans else True
+        return messagebox.askyesno("Выйти?", "Последние изменения в макросах не сохранены: в них есть ошибка. "
+                                             "Выйти без сохранения?", parent=self)
 
     def _test(self):
         if self.cur is None:
@@ -1109,19 +1331,19 @@ class MacroEditor(ttk.Frame):
             if not messagebox.askyesno("Проверка", "Этот макрос усыпит или выключит компьютер. Выполнить?", parent=self):
                 return
         macro = denormalize(m)
-        self._say(f"Выполняю «{m['label']}»…")
+        self._say(f"выполняю «{m['label']}»…")
 
         def run():
             try:
                 agent.run_macro(macro)
                 self.after(0, self._say, f"«{m['label']}» выполнен")
             except Exception as e:  # noqa: BLE001 — show any failure to the user
-                self.after(0, self._say, f"Ошибка: {e}", True)
+                self.after(0, self._say, f"ошибка: {e}", True)
 
         threading.Timer(0.6, run).start()
 
     def _say(self, msg, error=False):
-        self.status.config(text=msg, foreground=DANGER if error else DIM)
+        self.status.config(text=msg, fg=DANGER if error else DIM)
 
 
 # ================================================================ entry point
