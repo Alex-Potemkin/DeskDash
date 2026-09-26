@@ -49,6 +49,26 @@ pc-agent/      исходники Windows-части (Python): агент, ок�
 
 Настройки и макросы хранятся в `%APPDATA%\DeskDash\config.json`.
 
+## Компьютер: Linux
+
+То же приложение работает на Linux (X11 и Wayland).
+
+```bash
+git clone https://github.com/Alex-Potemkin/DeskDash && cd DeskDash
+./linux/install.sh                              # из исходников
+./linux/install.sh ~/Downloads/DeskDash-linux-x86_64   # или готовый бинарник из Releases
+```
+
+Скрипт ставит нужные утилиты (Tk для Python, `xdotool`, `playerctl`) и добавляет DeskDash
+в меню приложений, из терминала запускается командой `deskdash`.
+
+- Громкость: `wpctl` (PipeWire), `pactl` (PulseAudio) или `amixer`. Медиа-клавиши: `playerctl`.
+- Сочетания клавиш: `xdotool` на X11, на Wayland `wtype` (Sway, Hyprland) или `ydotool`.
+- Блокировка, сон, выключение: `loginctl` / `systemctl`. Погасить экран: `xset`, KDE, GNOME или `wlopm`.
+- Если на рабочем столе нет трея (обычный GNOME), кнопка «закрыть» сворачивает окно; выход: Ctrl+Q.
+- Если стоит `ufw`, на странице «Подключение» есть команда, которая открывает нужные порты.
+- Настройки: `~/.config/deskdash/config.json`. Раздела «Настройки Windows» в макросах нет.
+
 ## Управление на телефоне
 - Свайп вверх/вниз у правого края экрана: громкость. У левого края: яркость
   (сбросить на системную: Настройки → «Яркость как в системе»).

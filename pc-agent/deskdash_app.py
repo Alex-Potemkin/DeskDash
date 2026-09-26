@@ -1,6 +1,7 @@
 """DeskDash for Windows: the phone agent + a small, quiet window to connect the phone and edit macros.
 
-Built into DeskDash.exe with build_exe.py. Runs the agent in the background and lives in the tray.
+Built into DeskDash.exe / DeskDash-linux-x86_64 with build_exe.py. Runs the agent in the background
+and lives in the tray (or the taskbar where the desktop has no tray).
 """
 import copy
 import ctypes
@@ -15,8 +16,12 @@ import time
 import tkinter as tk
 import tkinter.font as tkfont
 import urllib.request
-import winreg
+import webbrowser
 from tkinter import filedialog, messagebox
+
+IS_WIN = os.name == "nt"
+if IS_WIN:
+    import winreg
 
 import pystray
 from PIL import Image, ImageDraw
@@ -53,6 +58,8 @@ DEVICE_RU = {"Computer": "компьютер", "Smartphone": "телефон", "
 
 KINDS = [("keys", "клавиши"), ("site", "сайт"), ("settings", "настройки Windows"),
          ("run", "программа"), ("file", "файл или папка"), ("system", "система"), ("wait", "пауза, мс")]
+if not IS_WIN:
+    KINDS = [k for k in KINDS if k[0] != "settings"]
 KIND_LABEL = dict(KINDS)
 SYSTEM = [("lock", "заблокировать"), ("monitor_off", "погасить экран"), ("sleep", "сон"),
           ("hibernate", "гибернация"), ("shutdown", "выключить"), ("restart", "перезагрузить")]
@@ -78,6 +85,8 @@ TEMPLATES = [
     ("Сочетание клавиш", "Клавиши", "bolt", False, [("keys", "")]),
     ("Выключить компьютер", "Выкл", "power", True, [("system", "shutdown")]),
 ]
+if not IS_WIN:
+    TEMPLATES = [t for t in TEMPLATES if t[4][0][0] != "settings"]
 MOD_KEYSYMS = {"Shift_L", "Shift_R", "Control_L", "Control_R", "Alt_L", "Alt_R", "Win_L", "Win_R"}
 KEYSYM_NAMES = {
     "Return": "enter", "Escape": "esc", "Tab": "tab", "space": "space", "BackSpace": "backspace",
@@ -106,11 +115,19 @@ edit_config = agent.update_config
 def autostart_command():
     if getattr(sys, "frozen", False):
         return f'"{sys.executable}" --minimized'
+    if not IS_WIN:
+        return f'"{sys.executable}" "{os.path.abspath(__file__)}" --minimized'
     pyw = os.path.join(os.path.dirname(sys.executable), "pythonw.exe")
     return f'"{pyw}" "{os.path.abspath(__file__)}" --minimized'
 
 
+AUTOSTART_DESKTOP = os.path.join(os.environ.get("XDG_CONFIG_HOME") or os.path.expanduser("~/.config"),
+                                 "autostart", "deskdash.desktop")
+
+
 def get_autostart():
+    if not IS_WIN:
+        return os.path.exists(AUTOSTART_DESKTOP)
     try:
         with winreg.OpenKey(winreg.HKEY_CURRENT_USER, RUN_KEY) as k:
             winreg.QueryValueEx(k, APP_ID)
@@ -120,6 +137,15 @@ def get_autostart():
 
 
 def set_autostart(on):
+    if not IS_WIN:
+        if on:
+            os.makedirs(os.path.dirname(AUTOSTART_DESKTOP), exist_ok=True)
+            with open(AUTOSTART_DESKTOP, "w", encoding="utf-8") as f:
+                f.write("[Desktop Entry]\nType=Application\nName=DeskDash\n"
+                        f"Exec={autostart_command()}\nX-GNOME-Autostart-enabled=true\n")
+        elif os.path.exists(AUTOSTART_DESKTOP):
+            os.remove(AUTOSTART_DESKTOP)
+        return
     with winreg.OpenKey(winreg.HKEY_CURRENT_USER, RUN_KEY, 0, winreg.KEY_SET_VALUE) as k:
         if on:
             winreg.SetValueEx(k, APP_ID, 0, winreg.REG_SZ, autostart_command())
@@ -160,6 +186,8 @@ def ago(t):
 
 def dark_title_bar(win):
     """Dark, background-coloured native title bar (Windows 10 20H1+ / 11)."""
+    if not IS_WIN:
+        return
     try:
         hwnd = ctypes.windll.user32.GetParent(win.winfo_id())
         dwm = ctypes.windll.dwmapi
@@ -268,13 +296,22 @@ class F:
         fams = set(tkfont.families())
 
         def pick(*names):
-            return next((n for n in names if n in fams), "Segoe UI")
+            return next((n for n in names if n in fams), "Segoe UI" if IS_WIN else "TkDefaultFont")
 
-        cls.display = pick("Segoe UI Variable Display Light", "Segoe UI Light")
-        cls.text = pick("Segoe UI Variable Text", "Segoe UI")
-        cls.semi = pick("Segoe UI Variable Text Semibold", "Segoe UI Semibold")
-        cls.icon = pick("Segoe Fluent Icons", "Segoe MDL2 Assets")
-        cls.mono = pick("Cascadia Mono Light", "Cascadia Mono", "Consolas")
+        cls.display = pick("Segoe UI Variable Display Light", "Segoe UI Light", "Inter Light", "Inter",
+                           "Cantarell", "Ubuntu Light", "Noto Sans", "DejaVu Sans")
+        cls.text = pick("Segoe UI Variable Text", "Segoe UI", "Inter", "Cantarell", "Ubuntu", "Noto Sans",
+                        "DejaVu Sans")
+        cls.semi = pick("Segoe UI Variable Text Semibold", "Segoe UI Semibold", "Inter SemiBold", "Inter",
+                        "Cantarell", "Ubuntu", "Noto Sans", "DejaVu Sans")
+        cls.icon = next((n for n in ("Segoe Fluent Icons", "Segoe MDL2 Assets") if n in fams), None)
+        cls.mono = pick("Cascadia Mono Light", "Cascadia Mono", "Consolas", "JetBrains Mono", "Ubuntu Mono",
+                        "DejaVu Sans Mono", "Liberation Mono")
+
+
+def glyph(ch):
+    """Icon-font glyph where Segoe Fluent Icons exists, a quiet dot elsewhere (Linux)."""
+    return ch if F.icon else "\u2022"
 
 
 def bg_of(w):
@@ -424,12 +461,12 @@ class App(tk.Tk):
             self.state_lbl.config(text=f"●  в сети · порт {agent.config()['port']}")
 
         self.nav = {}
-        for key, glyph, name in NAV:
+        for key, icon, name in NAV:
             row = tk.Frame(side, bg=BG, cursor="hand2")
             row.pack(fill="x", pady=1)
             bar = tk.Frame(row, bg=BG, width=2)
             bar.pack(side="left", fill="y")
-            ic = txt(row, glyph, 11, DIM, F.icon)
+            ic = txt(row, glyph(icon), 11, DIM, F.icon)
             ic.pack(side="left", padx=(26, 12), pady=9)
             lb = txt(row, name, 10, DIM)
             lb.pack(side="left")
@@ -453,8 +490,11 @@ class App(tk.Tk):
 
         self.protocol("WM_DELETE_WINDOW", self.on_close)
         agent.ON_SHOW = lambda: self.events.put("show")
-        self.tray = pystray.Icon(APP_ID, make_icon(64), "DeskDash", menu=pystray.Menu(self._tray_items))
-        self.tray.run_detached()
+        try:
+            self.tray = pystray.Icon(APP_ID, make_icon(64), "DeskDash", menu=pystray.Menu(self._tray_items))
+            self.tray.run_detached()
+        except Exception:  # noqa: BLE001 — no tray on this desktop: the window just minimises
+            self.tray = None
         self.tray_hint_shown = False
         self.visible = not minimized
         threading.Thread(target=self._device_loop, daemon=True).start()
@@ -463,6 +503,7 @@ class App(tk.Tk):
         if minimized:
             self.withdraw()
         self.bind_all("<Control-s>", lambda e: self.editor.save())
+        self.bind_all("<Control-q>", lambda e: self.quit_app())
         self._pump()
 
     # ---------------------------------------------------------- navigation
@@ -519,7 +560,8 @@ class App(tk.Tk):
 
     def refresh_tray(self):
         try:
-            self.tray.update_menu()
+            if self.tray:
+                self.tray.update_menu()
         except Exception:  # noqa: BLE001 — tray not ready yet
             pass
 
@@ -576,6 +618,11 @@ class App(tk.Tk):
         self.focus_force()
 
     def on_close(self):
+        if not self.tray or not (IS_WIN or self.tray.HAS_MENU):
+            # Linux desktops without a usable tray (stock GNOME): keep the window reachable via the taskbar
+            self.editor.save(quiet=True)
+            self.iconify()
+            return
         if agent.config().get("tray_on_close", True):
             self.editor.save(quiet=True)
             self.withdraw()
@@ -594,7 +641,8 @@ class App(tk.Tk):
             self.show()
             return
         try:
-            self.tray.stop()
+            if self.tray:
+                self.tray.stop()
         except Exception:  # noqa: BLE001
             pass
         if self.server:
@@ -637,9 +685,15 @@ class ConnectionPage(tk.Frame):
         caption(self, "Если телефон не видит ноутбук").pack(anchor="w", pady=(34, 8))
         fix = tk.Frame(self, bg=BG)
         fix.pack(anchor="w")
-        link(fix, "разрешить в брандмауэре", self._firewall).pack(side="left")
-        txt(fix, "   ·   ", 10, FAINT).pack(side="left")
-        link(fix, "сделать сеть частной", lambda: os.startfile("ms-settings:network-status")).pack(side="left")
+        if IS_WIN:
+            link(fix, "разрешить в брандмауэре", self._firewall).pack(side="left")
+            txt(fix, "   ·   ", 10, FAINT).pack(side="left")
+            link(fix, "сделать сеть частной", lambda: os.startfile("ms-settings:network-status")).pack(side="left")
+        else:
+            port = agent.config()["port"]
+            ufw = f"sudo ufw allow {port}/tcp && sudo ufw allow {agent.DISCOVERY_PORT}/udp"
+            txt(fix, ufw, 10, DIM, F.mono).pack(side="left")
+            link(fix, "копировать", lambda: self._copy(ufw, "команда"), FAINT, DIM, 9).pack(side="left", padx=(14, 0))
 
         self.log_lbl = txt(self, "", 8, FAINT, F.mono, justify="left", anchor="w")
         self.log_lbl.pack(side="bottom", anchor="w", fill="x")
@@ -729,7 +783,7 @@ class SettingsPage(tk.Frame):
         row(4, "Кнопка «закрыть»", lambda p: Toggle(p, "сворачивает в трей", cfg.get("tray_on_close", True),
                                                     lambda v: self._set("tray_on_close", v)))
 
-        link(self, "открыть папку с настройками", lambda: os.startfile(agent.DATA_DIR), FAINT, DIM, 9).pack(
+        link(self, "открыть папку с настройками", lambda: agent.sysapi.open_target(agent.DATA_DIR), FAINT, DIM, 9).pack(
             anchor="w", pady=(10, 0))
         self.status = txt(self, "", 9, DIM)
         self.status.pack(side="bottom", anchor="w")
@@ -798,7 +852,7 @@ class SpotifyPage(tk.Frame):
             return r
 
         s1 = step("1", "Создай приложение в панели разработчика Spotify")
-        link(s1, "открыть панель  →", lambda: os.startfile(spotify.DASHBOARD_URL), ACCENT, TEXT).pack(
+        link(s1, "открыть панель  →", lambda: webbrowser.open(spotify.DASHBOARD_URL), ACCENT, TEXT).pack(
             side="left", padx=(14, 0))
         step("2", "В Redirect URIs добавь этот адрес, отметь Web API")
         r2 = tk.Frame(self.setup, bg=BG)
@@ -848,7 +902,7 @@ class SpotifyPage(tk.Frame):
         for d in self.app.sp_devices:
             r = tk.Frame(self.dev_list, bg=BG, cursor="hand2")
             r.pack(fill="x")
-            ic = txt(r, DEVICE_GLYPH.get(d["type"], ""), 13, ACCENT if d["active"] else DIM, F.icon)
+            ic = txt(r, glyph(DEVICE_GLYPH.get(d["type"], "")), 13, ACCENT if d["active"] else DIM, F.icon)
             ic.pack(side="left", padx=(10, 18), pady=12)
             name = txt(r, d["name"], 12, TEXT)
             name.pack(side="left")
@@ -900,7 +954,7 @@ class SpotifyPage(tk.Frame):
             self.msg.config(text="Client ID — это 32 символа из панели Spotify", fg=DANGER)
             return
         spotify.set_client_id(cid)
-        os.startfile(spotify.login_url())
+        webbrowser.open(spotify.login_url())
         self.msg.config(text="подтверди вход в открывшемся браузере…", fg=DIM)
 
     def _logout(self):
@@ -991,7 +1045,7 @@ class MacroEditor(tk.Frame):
         for i, m in enumerate(self.macros):
             r = tk.Frame(self.list_area.inner, bg=BG, cursor="hand2")
             r.pack(fill="x")
-            ic = txt(r, ICON_GLYPH.get(m["icon"], ICON_GLYPH["bolt"]), 10, FAINT, F.icon)
+            ic = txt(r, glyph(ICON_GLYPH.get(m["icon"], ICON_GLYPH["bolt"])), 10, FAINT, F.icon)
             ic.pack(side="left", padx=(0, 14), pady=7)
             lb = txt(r, m["label"] or m["id"] or "без названия", 10, DIM)
             lb.pack(side="left")
@@ -1006,7 +1060,7 @@ class MacroEditor(tk.Frame):
         for i, (ic, lb) in enumerate(self.rows):
             on = i == self.cur
             m = self.macros[i]
-            ic.config(text=ICON_GLYPH.get(m["icon"], ICON_GLYPH["bolt"]), fg=ACCENT if on else FAINT)
+            ic.config(text=glyph(ICON_GLYPH.get(m["icon"], ICON_GLYPH["bolt"])), fg=ACCENT if on else FAINT)
             lb.config(text=m["label"] or m["id"] or "без названия", fg=TEXT if on else DIM)
 
     def _hover(self, i, inside):
@@ -1038,7 +1092,7 @@ class MacroEditor(tk.Frame):
         self._render_steps()
 
     def _paint_icon(self, name):
-        self.icon_glyph.config(text=ICON_GLYPH.get(name, ICON_GLYPH["bolt"]))
+        self.icon_glyph.config(text=glyph(ICON_GLYPH.get(name, ICON_GLYPH["bolt"])))
         self.icon_lbl.config(text=ICON_NAMES.get(name, name) + "  ▾")
         self.icon_name = name
 
@@ -1173,7 +1227,8 @@ class MacroEditor(tk.Frame):
 
     def _browse(self, var, kind):
         if kind == "run":
-            p = filedialog.askopenfilename(parent=self, filetypes=[("Программы", "*.exe *.bat *.lnk"), ("Все файлы", "*.*")])
+            types = [("Программы", "*.exe *.bat *.lnk"), ("Все файлы", "*.*")] if IS_WIN else [("Все файлы", "*")]
+            p = filedialog.askopenfilename(parent=self, filetypes=types)
             if p:
                 var.set(f'"{os.path.normpath(p)}"')
         else:
@@ -1184,7 +1239,7 @@ class MacroEditor(tk.Frame):
     def _open_now(self, var):
         v = to_cfg_step({"kind": "site", "value": var.get()})["open"]
         if v and v.lower() not in ("https://", "http://"):
-            os.startfile(v)
+            webbrowser.open(v)
 
     def _add_step(self):
         if self.cur is None:
@@ -1348,14 +1403,32 @@ class MacroEditor(tk.Frame):
 
 # ================================================================ entry point
 
-def main():
+_instance_lock = None
+
+
+def already_running():
+    """Single instance: a named mutex on Windows, a lock file on Linux."""
+    global _instance_lock
+    if IS_WIN:
+        _instance_lock = ctypes.windll.kernel32.CreateMutexW(None, False, "DeskDash.PC.Singleton")
+        return ctypes.windll.kernel32.GetLastError() == 183  # ERROR_ALREADY_EXISTS
+    import fcntl
+    _instance_lock = open(os.path.join(agent.DATA_DIR, "instance.lock"), "w")
     try:
-        ctypes.windll.shcore.SetProcessDpiAwareness(1)
-    except Exception:  # noqa: BLE001 — older Windows
-        pass
-    ctypes.windll.shell32.SetCurrentProcessExplicitAppUserModelID("DeskDash.PC")
-    mutex = ctypes.windll.kernel32.CreateMutexW(None, False, "DeskDash.PC.Singleton")  # noqa: F841 — held for life
-    if ctypes.windll.kernel32.GetLastError() == 183:  # ERROR_ALREADY_EXISTS: wake the running window
+        fcntl.flock(_instance_lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        return False
+    except OSError:
+        return True
+
+
+def main():
+    if IS_WIN:
+        try:
+            ctypes.windll.shcore.SetProcessDpiAwareness(1)
+        except Exception:  # noqa: BLE001 — older Windows
+            pass
+        ctypes.windll.shell32.SetCurrentProcessExplicitAppUserModelID("DeskDash.PC")
+    if already_running():  # wake the running window instead
         try:
             urllib.request.urlopen(f"http://127.0.0.1:{agent.config()['port']}/api/show", timeout=2)
         except Exception:  # noqa: BLE001
@@ -1365,7 +1438,8 @@ def main():
     try:
         server = agent.start()
     except OSError as e:
-        error = "порт занят" if getattr(e, "winerror", None) == 10048 else str(e)
+        busy = getattr(e, "winerror", None) == 10048 or getattr(e, "errno", None) in (98, 48)
+        error = "порт занят" if busy else str(e)
     App(server, error, "--minimized" in sys.argv).mainloop()
 
 

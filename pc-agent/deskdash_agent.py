@@ -1,17 +1,15 @@
 """DeskDash Agent: lets the DeskDash phone dashboard show PC stats and run macros.
 
-Standard library only (Windows). The GUI (deskdash_app.py / DeskDash.exe) embeds it via start();
-it can also run headless:  python deskdash_agent.py
-Config lives in %APPDATA%\\DeskDash\\config.json; edits apply without a restart.
+Standard library only; the OS-specific parts live in sys_windows.py / sys_linux.py.
+The GUI (deskdash_app.py / DeskDash.exe) embeds it via start(); it can also run headless:
+    python deskdash_agent.py
+Config: %APPDATA%/DeskDash/config.json on Windows, ~/.config/deskdash/config.json on Linux.
 """
 import collections
-import ctypes
-import ctypes.wintypes as wt
 import json
 import os
 import secrets
 import socket
-import subprocess
 import sys
 import threading
 import time
@@ -21,7 +19,12 @@ from urllib.parse import parse_qs, unquote, urlparse
 
 import spotify
 
-DATA_DIR = os.path.join(os.environ.get("APPDATA") or os.path.expanduser("~"), "DeskDash")
+if os.name == "nt":
+    import sys_windows as sysapi
+    DATA_DIR = os.path.join(os.environ.get("APPDATA") or os.path.expanduser("~"), "DeskDash")
+else:
+    import sys_linux as sysapi
+    DATA_DIR = os.path.join(os.environ.get("XDG_CONFIG_HOME") or os.path.expanduser("~/.config"), "deskdash")
 os.makedirs(DATA_DIR, exist_ok=True)
 CONFIG_PATH = os.path.join(DATA_DIR, "config.json")
 LOG_PATH = os.path.join(DATA_DIR, "agent.log")
@@ -38,15 +41,13 @@ DEFAULT_MACROS = [
     {"id": "vol_up", "label": "Громче", "icon": "vol_up", "keys": "volume_up", "repeat": 3},
     {"id": "media", "label": "Пауза", "icon": "play", "keys": "media_play_pause"},
     {"id": "desktop", "label": "Стол", "icon": "desktop", "keys": "win+d"},
-    {"id": "shot", "label": "Скрин", "icon": "screenshot", "keys": "win+shift+s"},
-    {"id": "spotify", "label": "Spotify", "icon": "music", "run": "start spotify:"},
+    {"id": "shot", "label": "Скрин", "icon": "screenshot", "keys": sysapi.SCREENSHOT_KEYS},
+    {"id": "spotify", "label": "Spotify", "icon": "music", "run": sysapi.SPOTIFY_COMMAND},
     {"id": "screen_off", "label": "Экран", "icon": "eye_off", "system": "monitor_off"},
     {"id": "sleep", "label": "Сон", "icon": "sleep", "system": "sleep", "confirm": True},
 ]
 
-user32 = ctypes.WinDLL("user32", use_last_error=True)
-kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
-kernel32.GetTickCount64.restype = ctypes.c_ulonglong
+vk_of = sysapi.check_key  # the GUI validates key names through this
 
 
 def log(msg):
@@ -116,139 +117,24 @@ def update_config(fn):
 spotify.init(config, update_config)
 
 
-# ---------- keyboard ----------
-
-KEYUP, EXTENDED = 0x2, 0x1
-VK = {
-    "ctrl": 0x11, "control": 0x11, "shift": 0x10, "alt": 0x12, "win": 0x5B,
-    "esc": 0x1B, "tab": 0x09, "enter": 0x0D, "space": 0x20, "backspace": 0x08,
-    "delete": 0x2E, "insert": 0x2D, "home": 0x24, "end": 0x23, "pgup": 0x21, "pgdn": 0x22,
-    "left": 0x25, "up": 0x26, "right": 0x27, "down": 0x28, "printscreen": 0x2C,
-    "volume_mute": 0xAD, "volume_down": 0xAE, "volume_up": 0xAF,
-    "media_next": 0xB0, "media_prev": 0xB1, "media_stop": 0xB2, "media_play_pause": 0xB3,
-}
-EXTENDED_KEYS = {0x21, 0x22, 0x23, 0x24, 0x25, 0x26, 0x27, 0x28, 0x2D, 0x2E, 0x5B, 0x5C} | set(range(0xAD, 0xB4))
-
-
-def vk_of(name):
-    name = name.strip().lower()
-    if name in VK:
-        return VK[name]
-    if len(name) == 1 and name.isalnum():
-        return ord(name.upper())
-    if name.startswith("f") and name[1:].isdigit() and 1 <= int(name[1:]) <= 24:
-        return 0x6F + int(name[1:])
-    raise ValueError(f"unknown key: {name}")
-
-
-def press(combo, repeat=1):
-    vks = [vk_of(k) for k in combo.split("+")]
-    for _ in range(max(1, repeat)):
-        for vk in vks:
-            user32.keybd_event(vk, 0, EXTENDED if vk in EXTENDED_KEYS else 0, 0)
-        for vk in reversed(vks):
-            user32.keybd_event(vk, 0, (EXTENDED if vk in EXTENDED_KEYS else 0) | KEYUP, 0)
-        time.sleep(0.03)
-
-
 # ---------- actions ----------
-
-def suspend(hibernate):
-    ctypes.WinDLL("powrprof").SetSuspendState(hibernate, True, False)
-
-
-def system_action(name):
-    if name == "lock":
-        user32.LockWorkStation()
-    elif name == "monitor_off":
-        user32.PostMessageW(0xFFFF, 0x0112, 0xF170, 2)  # HWND_BROADCAST, WM_SYSCOMMAND, SC_MONITORPOWER
-    elif name == "sleep":
-        threading.Timer(1.0, suspend, (False,)).start()  # let the HTTP reply go out first
-    elif name == "hibernate":
-        threading.Timer(1.0, suspend, (True,)).start()
-    elif name == "shutdown":
-        subprocess.Popen("shutdown /s /t 5", shell=True)
-    elif name == "restart":
-        subprocess.Popen("shutdown /r /t 5", shell=True)
-    else:
-        raise ValueError(f"unknown system action: {name}")
-
 
 def run_step(step):
     if "wait" in step:
         time.sleep(float(step["wait"]) / 1000)
     if "keys" in step:
-        press(step["keys"], int(step.get("repeat", 1)))
+        sysapi.press(step["keys"], int(step.get("repeat", 1)))
     if "run" in step:
-        subprocess.Popen(step["run"], shell=True, cwd=os.path.expanduser("~"))
+        sysapi.run_command(step["run"])
     if "open" in step:
-        os.startfile(step["open"])
+        sysapi.open_target(step["open"])
     if "system" in step:
-        system_action(step["system"])
+        sysapi.system_action(step["system"])
 
 
 def run_macro(macro):
     for step in macro.get("steps") or [macro]:
         run_step(step)
-
-
-# ---------- stats ----------
-
-class FILETIME(ctypes.Structure):
-    _fields_ = [("lo", wt.DWORD), ("hi", wt.DWORD)]
-
-
-class MEMSTAT(ctypes.Structure):
-    _fields_ = [("dwLength", wt.DWORD), ("dwMemoryLoad", wt.DWORD)] + [
-        (n, ctypes.c_ulonglong) for n in (
-            "ullTotalPhys", "ullAvailPhys", "ullTotalPageFile", "ullAvailPageFile",
-            "ullTotalVirtual", "ullAvailVirtual", "ullAvailExtendedVirtual")
-    ]
-
-
-class POWER(ctypes.Structure):
-    _fields_ = [("ACLineStatus", ctypes.c_ubyte), ("BatteryFlag", ctypes.c_ubyte),
-                ("BatteryLifePercent", ctypes.c_ubyte), ("SystemStatusFlag", ctypes.c_ubyte),
-                ("BatteryLifeTime", wt.DWORD), ("BatteryFullLifeTime", wt.DWORD)]
-
-
-_cpu = {"percent": 0.0}
-
-
-def _sys_times():
-    idle, kern, user = FILETIME(), FILETIME(), FILETIME()
-    kernel32.GetSystemTimes(ctypes.byref(idle), ctypes.byref(kern), ctypes.byref(user))
-    return [(t.hi << 32) | t.lo for t in (idle, kern, user)]
-
-
-def cpu_sampler():
-    prev = _sys_times()
-    while True:
-        time.sleep(1.5)
-        cur = _sys_times()
-        idle = cur[0] - prev[0]
-        total = (cur[1] - prev[1]) + (cur[2] - prev[2])  # kernel time includes idle
-        if total > 0:
-            _cpu["percent"] = max(0.0, min(100.0, 100.0 * (1 - idle / total)))
-        prev = cur
-
-
-def stats():
-    m = MEMSTAT()
-    m.dwLength = ctypes.sizeof(m)
-    kernel32.GlobalMemoryStatusEx(ctypes.byref(m))
-    p = POWER()
-    kernel32.GetSystemPowerStatus(ctypes.byref(p))
-    battery = None if p.BatteryFlag == 128 or p.BatteryLifePercent == 255 else p.BatteryLifePercent
-    return {
-        "cpu": round(_cpu["percent"], 1),
-        "ram": m.dwMemoryLoad,
-        "ram_used_gb": round((m.ullTotalPhys - m.ullAvailPhys) / 2 ** 30, 1),
-        "ram_total_gb": round(m.ullTotalPhys / 2 ** 30, 1),
-        "battery": battery,
-        "charging": p.ACLineStatus == 1,
-        "uptime": kernel32.GetTickCount64() // 1000,
-    }
 
 
 # ---------- http ----------
@@ -324,7 +210,7 @@ font:18px 'Segoe UI',sans-serif"><div style="text-align:center"><div style="font
                                     "macros": [public_macro(m) for m in cfg["macros"]],
                                     "spotify": spotify.status()["logged_in"]})
         if path == "/api/stats":
-            return self._send(200, stats())
+            return self._send(200, sysapi.stats())
         if path == "/api/spotify/devices":
             return self._spotify(lambda: {"devices": spotify.devices()})
         if path == "/api/spotify/state":
@@ -395,7 +281,7 @@ def start():
     """Starts the agent in background threads; returns the HTTP server. Raises OSError if the port is busy."""
     cfg = config()
     server = ThreadingHTTPServer(("0.0.0.0", int(cfg["port"])), Handler)
-    threading.Thread(target=cpu_sampler, daemon=True).start()
+    sysapi.start_background()
     threading.Thread(target=discovery, daemon=True).start()
     threading.Thread(target=server.serve_forever, daemon=True).start()
     log(f"агент запущен, порт {cfg['port']}")

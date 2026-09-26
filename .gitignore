@@ -12,3 +12,7 @@ __pycache__/
 
 # not wired into the app
 pc-agent/unlock.py
+
+# linux builds and CI screenshots
+DeskDash-linux-*
+ci-shots/

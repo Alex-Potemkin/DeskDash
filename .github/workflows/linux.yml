@@ -1,0 +1,62 @@
+name: Linux build
+
+on:
+  push:
+    branches: [main, linux]
+    paths: ["pc-agent/**", "linux/**", ".github/workflows/linux.yml"]
+    tags: ["v*"]
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    # oldest supported runner = widest glibc compatibility for the binary
+    runs-on: ubuntu-22.04
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: System packages
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y python3-tk python3-pip xvfb xdotool fonts-noto-core fonts-dejavu-core
+
+      - name: Python packages
+        run: python3 -m pip install --user pyinstaller pystray pillow
+
+      - name: Smoke test (agent, key press, GUI under Xvfb)
+        run: SHOTS_DIR=ci-shots xvfb-run -a -s "-screen 0 1280x800x24" python3 pc-agent/ci_smoke.py
+
+      - name: Test linux/install.sh (from source)
+        run: |
+          bash linux/install.sh
+          export XDG_CONFIG_HOME=$(mktemp -d)
+          xvfb-run -a ~/.local/bin/deskdash --minimized &
+          for i in $(seq 1 30); do curl -sf http://127.0.0.1:8765/api/ping && break; sleep 1; done
+          curl -sf http://127.0.0.1:8765/api/ping | grep deskdash
+          test -f ~/.local/share/applications/deskdash.desktop
+          pkill -f deskdash_app.py; sleep 2
+
+      - name: Build the binary
+        run: python3 pc-agent/build_exe.py
+
+      - name: Test the binary
+        run: |
+          export XDG_CONFIG_HOME=$(mktemp -d)
+          xvfb-run -a ./DeskDash-linux-x86_64 --minimized &
+          for i in $(seq 1 30); do curl -sf http://127.0.0.1:8765/api/ping && break; sleep 1; done
+          curl -sf http://127.0.0.1:8765/api/ping | grep deskdash
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: DeskDash-linux
+          path: |
+            DeskDash-linux-x86_64
+            ci-shots/
+
+      - name: Attach to the release
+        if: startsWith(github.ref, 'refs/tags/v')
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: gh release upload "${GITHUB_REF_NAME}" DeskDash-linux-x86_64 --clobber
