@@ -60,6 +60,7 @@ pages = ["conn", "macros", "spotify", "settings"]
 
 def shot(i):
     if i == len(pages):
+        app.show_page("macros")
         app.editor._add(da.TEMPLATES[1])
         app.after(800, lambda: (grab("macro_new"), done()))
         return

@@ -793,10 +793,11 @@ class SettingsPage(tk.Frame):
 
         row(0, "Имя на телефоне", lambda p: Field(p, self.name_var, 11, width=28, on_commit=self.save))
         row(1, "Порт", lambda p: Field(p, self.port_var, 11, width=8, on_commit=self.save),
-            "применится после перезапуска")
+            "после перезапуска")
         row(2, "MAC для пробуждения", lambda p: Field(p, self.mac_var, 11, F.mono, width=20, on_commit=self.save),
             f"пусто — {agent.default_mac()}")
-        row(3, "Автозапуск", lambda p: Toggle(p, "вместе с Windows, свёрнутым в трей", get_autostart(),
+        row(3, "Автозапуск", lambda p: Toggle(p, ("вместе с Windows" if IS_WIN else "при входе в систему")
+                                              + ", свёрнутым", get_autostart(),
                                               self._autostart))
         row(4, "Кнопка «закрыть»", lambda p: Toggle(p, "сворачивает в трей", cfg.get("tray_on_close", True),
                                                     lambda v: self._set("tray_on_close", v)))
