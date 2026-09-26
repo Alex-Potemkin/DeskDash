@@ -71,7 +71,7 @@ def grab(name):
     app.update()
     x, y, w, h = app.winfo_rootx(), app.winfo_rooty(), app.winfo_width(), app.winfo_height()
     ImageGrab.grab(bbox=(x, y, x + w, y + h), xdisplay=os.environ.get("DISPLAY")).save(f"{SHOTS}/{name}.png")
-    print("shot", name)
+    print("shot", name, flush=True)
 
 
 result = {}
@@ -100,7 +100,9 @@ def finish():
 
 app.after(1500, lambda: shot(0))
 app.mainloop()
+# Xvfb has no window manager, so iconify may stay "normal"; what matters is that the window isn't hidden
 print("after close:", result)
-ok = result.get("closed") == "iconic" or result.get("tray")
-print("gui ok" if ok else "gui FAILED")
+ok = result.get("closed") != "withdrawn" or result.get("tray")
+print("gui ok" if ok else "gui FAILED", flush=True)
+sys.stdout.flush()
 os._exit(0 if ok else 1)  # pystray's X11 thread is not a daemon
