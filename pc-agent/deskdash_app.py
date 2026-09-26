@@ -23,8 +23,16 @@ IS_WIN = os.name == "nt"
 if IS_WIN:
     import winreg
 
-import pystray
 from PIL import Image, ImageDraw
+
+try:
+    import pystray
+except Exception:  # noqa: BLE001 — e.g. PyGObject present but no GTK/AppIndicator typelibs
+    os.environ["PYSTRAY_BACKEND"] = "xorg"
+    try:
+        import pystray
+    except Exception:  # noqa: BLE001 — no tray at all; the window minimises instead
+        pystray = None
 
 import deskdash_agent as agent
 import spotify
