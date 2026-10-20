@@ -24,7 +24,7 @@ public class MainActivity extends Activity {
             lp.layoutInDisplayCutoutMode = WindowManager.LayoutParams.LAYOUT_IN_DISPLAY_CUTOUT_MODE_SHORT_EDGES;
             w.setAttributes(lp);
         }
-        dash = new DashboardView(this, w, () -> startActivity(new Intent(this, SettingsActivity.class)));
+        dash = new DashboardView(this, w, screen -> startActivity(new Intent(this, screen)));
         setContentView(dash);
         if (!"ics".equals(new Prefs(this).calSource()) && !CalendarRepo.hasPermission(this)) {
             requestPermissions(new String[]{Manifest.permission.READ_CALENDAR}, 1);

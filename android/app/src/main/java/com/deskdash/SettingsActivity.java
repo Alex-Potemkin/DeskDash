@@ -49,6 +49,15 @@ public class SettingsActivity extends Activity {
         sv.addView(list);
         setContentView(sv);
 
+        section("Профиль");
+        profiles();
+        button("Столы и блоки", v -> {
+            saveAll();
+            startActivity(new Intent(this, DeskEditorActivity.class));
+        });
+        note("У каждого профиля свои тема, календарь, компьютер, умный дом и столы. Столов может быть несколько: "
+                + "на экране они листаются свайпом вбок, переключить профиль можно кнопкой внизу экрана или ⋮.");
+
         section("Стиль");
         String[][] themes = new String[DashTheme.ALL.length - 1][];
         for (int i = 0; i < themes.length; i++) themes[i] = new String[]{DashTheme.ALL[i].id, DashTheme.ALL[i].name};
@@ -93,6 +102,44 @@ public class SettingsActivity extends Activity {
         button("Проверить соединение", v -> test());
         note("На ПК запусти DeskDash.exe. Кнопки-макросы настраиваются там во вкладке «Макросы» и сами появятся на экране.");
 
+        section("Умный дом: Home Assistant");
+        edit("ha_url", "Адрес, например http://192.168.1.20:8123", InputType.TYPE_CLASS_TEXT | InputType.TYPE_TEXT_VARIATION_URI, false);
+        button(prefs.haRefresh().isEmpty() ? "Войти в Home Assistant" : "Войти заново", v -> {
+            saveAll();
+            if (prefs.haUrl().isEmpty()) {
+                Toast.makeText(this, "Сначала укажи адрес Home Assistant", Toast.LENGTH_SHORT).show();
+                return;
+            }
+            startActivity(new Intent(this, LoginActivity.class).putExtra(LoginActivity.EXTRA_MODE, "ha"));
+        });
+        edit("ha_token", "Или долгосрочный токен (необязательно)", InputType.TYPE_CLASS_TEXT | InputType.TYPE_TEXT_FLAG_NO_SUGGESTIONS, false);
+        note((prefs.haRefresh().isEmpty() ? "" : "Вход выполнен. ")
+                + "Адрес такой же, как в браузере. «Войти» откроет обычную страницу входа Home Assistant. "
+                + "Если вход не работает, создай токен: профиль пользователя в HA → «Безопасность» → «Долгосрочные токены доступа».");
+        button("Проверить Home Assistant", v -> testHome(true));
+        if (!prefs.haRefresh().isEmpty()) button("Выйти из Home Assistant", v -> {
+            sp.edit().remove("ha_access").remove("ha_refresh").remove("ha_expires").apply();
+            recreate();
+        });
+
+        section("Умный дом: Яндекс");
+        edit("ya_client_id", "ClientID приложения Яндекс OAuth", InputType.TYPE_CLASS_TEXT | InputType.TYPE_TEXT_FLAG_NO_SUGGESTIONS, false);
+        button(prefs.yaToken().isEmpty() ? "Войти в Яндекс" : "Войти заново", v -> {
+            saveAll();
+            if (prefs.yaClientId().isEmpty()) {
+                Toast.makeText(this, "Сначала вставь ClientID", Toast.LENGTH_SHORT).show();
+                return;
+            }
+            startActivity(new Intent(this, LoginActivity.class).putExtra(LoginActivity.EXTRA_MODE, "ya"));
+        });
+        edit("ya_token", "OAuth-токен (заполнится сам после входа)", InputType.TYPE_CLASS_TEXT | InputType.TYPE_TEXT_FLAG_NO_SUGGESTIONS, false);
+        note("Один раз: oauth.yandex.ru → «Создать приложение» → веб-сервисы, Redirect URI "
+                + "https://oauth.yandex.ru/verification_code, доступы «Умный дом»: просмотр и управление (iot:view, iot:control). "
+                + "Скопируй ClientID сюда и нажми «Войти в Яндекс». Токен живёт год.");
+        button("Проверить Яндекс", v -> testHome(false));
+        note("Устройства на экран добавляются в «Столы и блоки» → блок «Умный дом» → «Устройства…». "
+                + "Тап по плитке включает/выключает, долгий тап — яркость, цвет, температура.");
+
         section("Ночь");
         toggle("night_mode", "Ночной режим: тёмно-красная тема и минимальная яркость", true);
         edit("night_from", "С какого часа (23)", InputType.TYPE_CLASS_NUMBER, true);
@@ -105,11 +152,122 @@ public class SettingsActivity extends Activity {
 
     @Override
     protected void onPause() {
-        for (Runnable r : savers) r.run();
+        saveAll();
         super.onPause();
     }
 
+    /** Back from the login page or the desk editor: show what they changed (tokens, profile names). */
+    @Override
+    protected void onRestart() {
+        super.onRestart();
+        // fields were saved when we left; saving them again would overwrite a token the login page just stored
+        savers.clear();
+        recreate();
+    }
+
+    private void saveAll() {
+        for (Runnable r : savers) r.run();
+    }
+
+    // ---------------------------------------------------------------- profiles
+
+    private void profiles() {
+        List<Profiles.Profile> ps = Profiles.list(this);
+        String act = Profiles.active(this);
+        RadioGroup g = new RadioGroup(this);
+        for (Profiles.Profile p : ps) {
+            RadioButton b = new RadioButton(this);
+            b.setId(View.generateViewId());
+            b.setText(p.name);
+            b.setTextColor(TEXT);
+            b.setTextSize(TypedValue.COMPLEX_UNIT_SP, 15);
+            g.addView(b);
+            if (p.id.equals(act)) b.setChecked(true);
+            b.setOnCheckedChangeListener((v, on) -> {
+                if (!on || p.id.equals(Profiles.active(this))) return;
+                saveAll();
+                Profiles.setActive(this, p.id);
+                recreate();
+            });
+        }
+        add(g, 0, 4);
+        LinearLayout row = new LinearLayout(this);
+        row.addView(smallButton("Новый", v -> newProfile()));
+        row.addView(smallButton("Переименовать", v -> askName("Имя профиля", Profiles.name(this, act), s -> {
+            Profiles.rename(this, act, s);
+            recreate();
+        })));
+        if (ps.size() > 1) row.addView(smallButton("Удалить", v -> new AlertDialog.Builder(this)
+                .setMessage("Удалить профиль «" + Profiles.name(this, act) + "» со всеми его настройками и столами?")
+                .setPositiveButton("Удалить", (d, w) -> {
+                    savers.clear();
+                    Profiles.remove(this, act);
+                    recreate();
+                })
+                .setNegativeButton("Отмена", null).show()));
+        add(row, 2, 2);
+    }
+
+    private void newProfile() {
+        askName("Новый профиль", "", name -> new AlertDialog.Builder(this)
+                .setTitle("С чего начать?")
+                .setItems(new String[]{"Копия текущего профиля", "С нуля"}, (d, i) -> {
+                    saveAll();
+                    String id = Profiles.add(this, name, i == 0);
+                    Profiles.setActive(this, id);
+                    recreate();
+                }).show());
+    }
+
+    private interface NameResult {
+        void accept(String s);
+    }
+
+    private void askName(String title, String value, NameResult r) {
+        EditText e = new EditText(this);
+        e.setText(value);
+        e.setSingleLine();
+        e.setInputType(InputType.TYPE_CLASS_TEXT | InputType.TYPE_TEXT_FLAG_CAP_WORDS);
+        LinearLayout wrap = new LinearLayout(this);
+        wrap.setPadding(px(20), px(8), px(20), 0);
+        wrap.addView(e, new LinearLayout.LayoutParams(-1, -2));
+        new AlertDialog.Builder(this).setTitle(title).setView(wrap)
+                .setPositiveButton("OK", (d, w) -> {
+                    String s = e.getText().toString().trim();
+                    if (!s.isEmpty()) r.accept(s);
+                })
+                .setNegativeButton("Отмена", null).show();
+    }
+
+    private Button smallButton(String label, View.OnClickListener l) {
+        Button b = new Button(this);
+        b.setText(label);
+        b.setAllCaps(false);
+        b.setOnClickListener(l);
+        return b;
+    }
+
     // ---------------------------------------------------------------- actions
+
+    private void testHome(boolean ha) {
+        saveAll();
+        if (ha ? !HomeAssistant.configured(prefs) : !YandexHome.configured(prefs)) {
+            Toast.makeText(this, ha ? "Укажи адрес и войди в Home Assistant" : "Сначала войди в Яндекс", Toast.LENGTH_SHORT).show();
+            return;
+        }
+        Toast.makeText(this, "Проверяю…", Toast.LENGTH_SHORT).show();
+        new Thread(() -> {
+            String msg;
+            try {
+                java.util.List<HomeDevice> l = ha ? new HomeAssistant(prefs).states() : new YandexHome(prefs).devices();
+                msg = "Работает: " + l.size() + " устройств и сценариев";
+            } catch (Exception e) {
+                msg = "Ошибка: " + SmartHome.msg(e);
+            }
+            String m = msg;
+            runOnUiThread(() -> Toast.makeText(this, m, Toast.LENGTH_LONG).show());
+        }).start();
+    }
 
     private void discover() {
         Toast.makeText(this, "Ищу…", Toast.LENGTH_SHORT).show();

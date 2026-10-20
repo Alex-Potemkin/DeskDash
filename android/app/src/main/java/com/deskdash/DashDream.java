@@ -13,8 +13,8 @@ public class DashDream extends DreamService {
         setInteractive(true);
         setFullscreen(true);
         setScreenBright(true);
-        dash = new DashboardView(this, getWindow(), () -> {
-            startActivity(new Intent(this, SettingsActivity.class).addFlags(Intent.FLAG_ACTIVITY_NEW_TASK));
+        dash = new DashboardView(this, getWindow(), screen -> {
+            startActivity(new Intent(this, screen).addFlags(Intent.FLAG_ACTIVITY_NEW_TASK));
             finish();
         });
         setContentView(dash);

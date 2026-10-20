@@ -30,6 +30,18 @@
             android:label="Настройки"
             android:theme="@style/Settings" />
 
+        <activity
+            android:name=".DeskEditorActivity"
+            android:exported="false"
+            android:label="Столы"
+            android:theme="@style/Settings" />
+
+        <activity
+            android:name=".LoginActivity"
+            android:exported="false"
+            android:label="Вход"
+            android:theme="@style/Settings" />
+
         <service
             android:name=".MediaListenerService"
             android:exported="false"

@@ -80,13 +80,14 @@ import java.util.concurrent.Executors;
 import java.util.concurrent.atomic.AtomicBoolean;
 
 /**
- * The whole dashboard: clock + music + PC macros on the left, calendar (day or month) on the right.
+ * The whole dashboard. Shows the current desk of the active profile: columns of blocks (clock,
+ * music, PC macros, calendar, smart home tiles); horizontal swipes or the dots at the bottom switch desks.
  * Vertical swipes along the right edge change volume, along the left edge brightness.
  * Hosted by MainActivity and by the DashDream screensaver.
  */
 public class DashboardView extends FrameLayout {
     public interface Host {
-        void openSettings();
+        void open(Class<? extends android.app.Activity> screen);
     }
 
     private static final String SPOTIFY = "com.spotify.music";
@@ -156,6 +157,20 @@ public class DashboardView extends FrameLayout {
     private volatile long pcInfoAt;
     private String pcName = "";
 
+    // smart home
+    private final SmartHome home;
+    private final AtomicBoolean homeBusy = new AtomicBoolean();
+    private final List<HomePanel> homePanels = new ArrayList<>();
+    private FrameLayout sheet;
+
+    // desks
+    private int deskCount = 1, curDesk;
+    private String deskName = "";
+    private final List<View> hOwners = new ArrayList<>(); // views with their own horizontal swipes
+    private TextView barLabel;
+    private boolean swipeOk, swiping;
+    private float downX, downY;
+
     // edge swipe
     private int edge; // 0 none, 1 volume (right edge), 2 brightness (left edge)
     private boolean edgeActive;
@@ -179,14 +194,9 @@ public class DashboardView extends FrameLayout {
         prefs = new Prefs(c);
         dp = getResources().getDisplayMetrics().density;
         audio = c.getSystemService(AudioManager.class);
-        try {
-            JSONArray cached = new JSONArray(prefs.pcMacros());
-            macros = PcClient.parseMacros(cached);
-            macrosJson = cached.toString();
-        } catch (Exception ignored) {
-            // no cache yet
-        }
-        music = new MusicWatcher(c, new MusicWatcher.Listener() {
+        home = new SmartHome(prefs);
+        loadMacroCache();
+        music =new MusicWatcher(c, new MusicWatcher.Listener() {
             @Override
             public void onController(MediaController m) {
                 musicNoAccess = false;
@@ -228,6 +238,7 @@ public class DashboardView extends FrameLayout {
         lastMinute = -1;
         ui.post(secondTick);
         ui.post(pcPoll);
+        ui.post(homePoll);
         reloadCalendar();
         if (CalendarRepo.hasPermission(ctx)) {
             try {
@@ -244,6 +255,7 @@ public class DashboardView extends FrameLayout {
         running = false;
         ui.removeCallbacks(secondTick);
         ui.removeCallbacks(pcPoll);
+        ui.removeCallbacks(homePoll);
         ui.removeCallbacks(reloadCal);
         music.stop();
         try {
@@ -268,36 +280,67 @@ public class DashboardView extends FrameLayout {
     private void build() {
         removeAllViews();
         picker = null;
+        sheet = null;
+        forgetBlockViews();
         nightActive = isNight();
         th = nightActive ? DashTheme.byId("night") : DashTheme.byId(prefs.theme());
         setBackgroundColor(th.bg);
         renderedDay = null;
+
+        JSONArray desks = Desks.load(prefs);
+        deskCount = desks.length();
+        int di = Math.max(0, Math.min(prefs.deskIndex(), deskCount - 1));
+        curDesk = di;
+        JSONObject desk = desks.optJSONObject(di);
+        if (desk == null) desk = Desks.defaults().optJSONObject(0);
+        deskName = desk.optString("name");
 
         boolean portrait = getResources().getConfiguration().orientation == Configuration.ORIENTATION_PORTRAIT;
         content = new LinearLayout(ctx);
         content.setOrientation(portrait ? LinearLayout.VERTICAL : LinearLayout.HORIZONTAL);
         addView(content, new LayoutParams(LayoutParams.MATCH_PARENT, LayoutParams.MATCH_PARENT));
 
-        View left = buildLeft();
-        View right = buildRight();
-        View div = new View(ctx);
-        div.setBackgroundColor(th.line);
-        if (portrait) {
-            content.addView(left, new LinearLayout.LayoutParams(-1, 0, 45));
-            LinearLayout.LayoutParams dl = new LinearLayout.LayoutParams(-1, Math.max(1, (int) dp));
-            dl.setMargins(0, px(14), 0, px(14));
-            content.addView(div, dl);
-            content.addView(right, new LinearLayout.LayoutParams(-1, 0, 55));
-        } else {
-            content.addView(left, new LinearLayout.LayoutParams(0, -1, 53));
-            LinearLayout.LayoutParams dl = new LinearLayout.LayoutParams(Math.max(1, (int) dp), -1);
-            dl.setMargins(px(22), px(8), px(22), px(8));
-            content.addView(div, dl);
-            content.addView(right, new LinearLayout.LayoutParams(0, -1, 47));
+        Set<String> used = new HashSet<>();
+        JSONArray cols = desk.optJSONArray("cols");
+        int ncols = cols == null ? 0 : cols.length();
+        for (int i = 0; i < ncols; i++) {
+            JSONObject col = cols.optJSONObject(i);
+            if (col == null) continue;
+            if (content.getChildCount() > 0) {
+                View div = new View(ctx);
+                div.setBackgroundColor(th.line);
+                LinearLayout.LayoutParams dl;
+                if (portrait) {
+                    dl = new LinearLayout.LayoutParams(-1, Math.max(1, (int) dp));
+                    dl.setMargins(0, px(14), 0, px(14));
+                } else {
+                    dl = new LinearLayout.LayoutParams(Math.max(1, (int) dp), -1);
+                    dl.setMargins(px(22), px(8), px(22), px(8));
+                }
+                content.addView(div, dl);
+            }
+            LinearLayout colView = vertical();
+            JSONArray blocks = col.optJSONArray("blocks");
+            for (int j = 0; blocks != null && j < blocks.length(); j++) {
+                JSONObject b = blocks.optJSONObject(j);
+                if (b == null) continue;
+                String t = b.optString("t");
+                if (Desks.single(t) && !used.add(t)) continue;
+                View v = buildBlock(t, b);
+                if (v == null) continue;
+                int h = b.optInt("h", Desks.defaultHeight(t));
+                if (h <= 0 && Desks.needsHeight(t)) h = 1;
+                LinearLayout.LayoutParams lp = h > 0 ? new LinearLayout.LayoutParams(-1, 0, h) : new LinearLayout.LayoutParams(-1, -2);
+                if (colView.getChildCount() > 0) lp.topMargin = px(12);
+                colView.addView(v, lp);
+            }
+            int w = Math.max(1, col.optInt("w", 50));
+            content.addView(colView, portrait ? new LinearLayout.LayoutParams(-1, 0, w) : new LinearLayout.LayoutParams(0, -1, w));
         }
         level = new LevelView(ctx);
         level.setAlpha(0f);
         addView(level, new LayoutParams(px(52), px(200), Gravity.CENTER_VERTICAL | Gravity.END));
+        buildBar(di, !used.contains("calendar") && !used.contains("clock"));
 
         applyPadding();
         applyNightWindow();
@@ -307,11 +350,38 @@ public class DashboardView extends FrameLayout {
         renderMusic();
         renderMacros();
         renderPc();
+        renderHome();
     }
 
-    private View buildLeft() {
-        LinearLayout col = vertical();
+    /** Block views of the previous desk; every render method skips blocks that aren't on screen. */
+    private void forgetBlockViews() {
+        musicRow = macroRow = allDayRow = null;
+        musicCard = null;
+        clock = dateText = hint = calTitle = calCount = calMode = emptyText = detail = mTitle = mArtist = mTime = pcStatus = null;
+        fancy = null;
+        art = artBg = playBtn = deviceBtn = null;
+        mBar = null;
+        allDayScroll = null;
+        calScroll = null;
+        timeline = null;
+        monthView = null;
+        barLabel = null;
+        homePanels.clear();
+        hOwners.clear();
+    }
 
+    private View buildBlock(String type, JSONObject b) {
+        switch (type) {
+            case "clock": return buildClock();
+            case "music": return buildMusic();
+            case "pc": return buildPc();
+            case "calendar": return buildCalendar();
+            case "home": return buildHome(b);
+            default: return null;
+        }
+    }
+
+    private View buildClock() {
         LinearLayout clockBox = vertical();
         clockBox.setGravity(Gravity.CENTER_VERTICAL);
         String style = prefs.clockStyle();
@@ -367,15 +437,15 @@ public class DashboardView extends FrameLayout {
 
             @Override
             public void onLongPress(MotionEvent e) {
-                host.openSettings();
+                openSettings();
             }
         });
         clockBox.setOnTouchListener((v, e) -> gd.onTouchEvent(e));
-        col.addView(clockBox, new LinearLayout.LayoutParams(-1, 0, 1));
-
-        col.addView(buildMusic(), new LinearLayout.LayoutParams(-1, -2));
-        col.addView(buildPc(), margins(-1, -2, 0, 12, 0, 0));
-        return col;
+        clockBox.addOnLayoutChangeListener((v, l, t, r, b, ol, ot, or, ob) -> {
+            if (r - l != or - ol || b - t != ob - ot) post(this::sizeClock);
+        });
+        hOwners.add(clockBox);
+        return clockBox;
     }
 
     private static String prevStyle(String id) {
@@ -473,11 +543,12 @@ public class DashboardView extends FrameLayout {
         macroRow = new LinearLayout(ctx);
         macroRow.setOrientation(LinearLayout.HORIZONTAL);
         hs.addView(macroRow);
+        hOwners.add(hs);
         box.addView(hs, margins(-1, -2, 0, 6, 0, 0));
         return box;
     }
 
-    private View buildRight() {
+    private View buildCalendar() {
         LinearLayout col = vertical();
 
         LinearLayout header = new LinearLayout(ctx);
@@ -504,7 +575,7 @@ public class DashboardView extends FrameLayout {
         calMode.setOnClickListener(v -> toggleMonth());
         header.addView(calMode);
         ImageView gear = iconButton(R.drawable.ic_more, th.dim, 34);
-        gear.setOnClickListener(v -> host.openSettings());
+        gear.setOnClickListener(v -> openMenu());
         header.addView(gear, new LinearLayout.LayoutParams(px(34), px(34)));
         col.addView(header, new LinearLayout.LayoutParams(-1, -2));
 
@@ -513,6 +584,7 @@ public class DashboardView extends FrameLayout {
         allDayRow = new LinearLayout(ctx);
         allDayScroll.addView(allDayRow);
         allDayScroll.setVisibility(GONE);
+        hOwners.add(allDayScroll);
         col.addView(allDayScroll, margins(-1, -2, 0, 4, 0, 2));
 
         FrameLayout frame = new FrameLayout(ctx);
@@ -550,6 +622,7 @@ public class DashboardView extends FrameLayout {
             }
         });
         monthView.setVisibility(GONE);
+        hOwners.add(monthView);
         frame.addView(monthView, new FrameLayout.LayoutParams(-1, -1));
 
         emptyText = text(th.dim, 14);
@@ -637,16 +710,20 @@ public class DashboardView extends FrameLayout {
         hint.setText(nextHint());
     }
 
+    /** Digital clock as big as its block allows. */
     private void sizeClock() {
-        int w = getWidth(), h = getHeight();
-        if (clock == null || w == 0) return;
+        if (clock == null) return;
+        View box = (View) clock.getParent();
+        int w = getWidth(), h = getHeight(), colW = box.getWidth(), boxH = box.getHeight();
+        if (w == 0 || colW == 0) return;
         boolean portrait = h > w;
-        float colW = portrait ? w - px(40) : (w - px(90)) * 0.53f;
         float ems = prefs.seconds() ? 3.15f : 2.55f;
         if (!prefs.h24()) ems += 0.2f;
         if (prefs.clockFont().equals("mono")) ems *= 1.2f;
         float size = Math.min(colW * 0.9f / ems, (portrait ? h * 0.45f : h) * 0.25f);
-        clock.setTextSize(TypedValue.COMPLEX_UNIT_PX, size);
+        // leave room for the date and the next-event hint under the digits
+        if (boxH > 0) size = Math.min(size, (boxH - px(70)) / 1.1f);
+        clock.setTextSize(TypedValue.COMPLEX_UNIT_PX, Math.max(px(28), size));
     }
 
     @Override
@@ -733,18 +810,46 @@ public class DashboardView extends FrameLayout {
         return 0;
     }
 
+    private void onDown(MotionEvent e) {
+        edge = edgeAt(e.getX());
+        edgeActive = false;
+        edgeY0 = e.getY();
+        downX = e.getX();
+        downY = e.getY();
+        swiping = false;
+        swipeOk = deskCount > 1 && edge == 0 && !inHorizontalOwner(e.getRawX(), e.getRawY());
+    }
+
+    /** Clock, month grid and horizontal scrollers handle sideways swipes themselves. */
+    private boolean inHorizontalOwner(float rx, float ry) {
+        int[] loc = new int[2];
+        for (View v : hOwners) {
+            if (!v.isShown()) continue;
+            v.getLocationOnScreen(loc);
+            if (rx >= loc[0] && rx < loc[0] + v.getWidth() && ry >= loc[1] && ry < loc[1] + v.getHeight()) return true;
+        }
+        return false;
+    }
+
+    private boolean deskSwipeStarted(MotionEvent e) {
+        float dx = e.getX() - downX, dy = e.getY() - downY;
+        return swipeOk && Math.abs(dx) > 24 * dp && Math.abs(dx) > 1.6f * Math.abs(dy);
+    }
+
     @Override
     public boolean onInterceptTouchEvent(MotionEvent e) {
-        if (picker != null) return false;
+        if (picker != null || sheet != null) return false;
         switch (e.getActionMasked()) {
             case MotionEvent.ACTION_DOWN:
-                edge = edgeAt(e.getX());
-                edgeActive = false;
-                edgeY0 = e.getY();
+                onDown(e);
                 break;
             case MotionEvent.ACTION_MOVE:
                 if (edge != 0 && !edgeActive && Math.abs(e.getY() - edgeY0) > 10 * dp) {
                     startEdge(e.getY());
+                    return true;
+                }
+                if (!swiping && deskSwipeStarted(e)) {
+                    swiping = true;
                     return true;
                 }
                 break;
@@ -756,14 +861,34 @@ public class DashboardView extends FrameLayout {
 
     @Override
     public boolean onTouchEvent(MotionEvent e) {
+        if (swiping || e.getActionMasked() == MotionEvent.ACTION_MOVE && edge == 0 && deskSwipeStarted(e)) {
+            swiping = true;
+            float dx = e.getX() - downX;
+            switch (e.getActionMasked()) {
+                case MotionEvent.ACTION_MOVE:
+                    if (content != null) content.setTranslationX(dx * 0.35f);
+                    return true;
+                case MotionEvent.ACTION_UP:
+                case MotionEvent.ACTION_CANCEL:
+                    swiping = false;
+                    int dir = dx < 0 ? 1 : -1;
+                    int target = curDesk + dir;
+                    if (e.getActionMasked() == MotionEvent.ACTION_UP && Math.abs(dx) > 70 * dp && target >= 0 && target < deskCount) {
+                        goDesk(target, dir);
+                    } else if (content != null) {
+                        content.animate().translationX(0).setDuration(180).start();
+                    }
+                    return true;
+                default:
+                    return true;
+            }
+        }
         switch (e.getActionMasked()) {
             case MotionEvent.ACTION_DOWN:
-                edge = edgeAt(e.getX());
-                edgeActive = false;
-                edgeY0 = e.getY();
-                return edge != 0;
+                onDown(e);
+                return edge != 0 || swipeOk;
             case MotionEvent.ACTION_MOVE:
-                if (edge == 0) return false;
+                if (edge == 0) return swipeOk;
                 if (!edgeActive) {
                     if (Math.abs(e.getY() - edgeY0) <= 10 * dp) return true;
                     startEdge(e.getY());
@@ -943,11 +1068,11 @@ public class DashboardView extends FrameLayout {
         emptyText.setClickable(false);
         if (!"ics".equals(src) && !CalendarRepo.hasPermission(ctx)) {
             emptyText.setText("Нет доступа к календарю\nНажми, чтобы открыть настройки");
-            emptyText.setOnClickListener(v -> host.openSettings());
+            emptyText.setOnClickListener(v -> openSettings());
             emptyText.setVisibility(VISIBLE);
         } else if ("ics".equals(src) && prefs.icsUrls().trim().isEmpty()) {
             emptyText.setText("Добавь ICS-ссылку календаря\nв настройках");
-            emptyText.setOnClickListener(v -> host.openSettings());
+            emptyText.setOnClickListener(v -> openSettings());
             emptyText.setVisibility(VISIBLE);
         } else if (!monthMode && timed == 0) {
             emptyText.setText(shownDay.equals(LocalDate.now()) ? "На сегодня событий нет" : "В этот день событий нет");
@@ -1633,7 +1758,7 @@ public class DashboardView extends FrameLayout {
 
     private void onPcStatusClick() {
         if (prefs.pcHost().isEmpty()) {
-            host.openSettings();
+            openSettings();
         } else if (!pcOnline && !prefs.pcMac().isEmpty()) {
             String mac = prefs.pcMac();
             io.execute(() -> {
@@ -1668,6 +1793,351 @@ public class DashboardView extends FrameLayout {
             case "settings": return R.drawable.ic_settings;
             default: return R.drawable.ic_bolt;
         }
+    }
+
+    private void loadMacroCache() {
+        macros = new ArrayList<>();
+        macrosJson = "";
+        try {
+            JSONArray cached = new JSONArray(prefs.pcMacros());
+            macros = PcClient.parseMacros(cached);
+            macrosJson = cached.toString();
+        } catch (Exception ignored) {
+            // no cache yet
+        }
+    }
+
+    // ---------------------------------------------------------------- smart home
+
+    private View buildHome(JSONObject b) {
+        HomePanel p = new HomePanel(ctx, th, b.optString("title"), Desks.items(b), new HomePanel.Listener() {
+            @Override
+            public void onTap(HomeDevice d) {
+                homeTap(d);
+            }
+
+            @Override
+            public void onLong(HomeDevice d) {
+                openHomeSheet(d);
+            }
+
+            @Override
+            public void onSetup() {
+                host.open(SmartHome.configured(prefs) ? DeskEditorActivity.class : SettingsActivity.class);
+            }
+        });
+        homePanels.add(p);
+        return p;
+    }
+
+    private void renderHome() {
+        boolean on = SmartHome.configured(prefs);
+        String err = home.error();
+        for (HomePanel p : homePanels) p.render(home.devices(), on, err);
+    }
+
+    private final Runnable homePoll = new Runnable() {
+        @Override
+        public void run() {
+            if (!running) return;
+            pollHome(false);
+            ui.postDelayed(this, 5000);
+        }
+    };
+
+    private void pollHome(boolean forceYandex) {
+        if (homePanels.isEmpty() || !SmartHome.configured(prefs) || !homeBusy.compareAndSet(false, true)) return;
+        io.execute(() -> {
+            try {
+                home.poll(forceYandex);
+            } finally {
+                homeBusy.set(false);
+            }
+            ui.post(this::renderHome);
+        });
+    }
+
+    private final Runnable homeRecheck = () -> pollHome(true);
+
+    /** Tap on a tile: toggle, run a scene; sensors, locks and thermostats open the detail card instead. */
+    private void homeTap(HomeDevice d) {
+        if (!d.available) return;
+        if (d.kind == HomeDevice.SCENE) {
+            homeAction(d, null, () -> home.runScene(d));
+            Toast.makeText(ctx, "Запускаю «" + d.name + "»", Toast.LENGTH_SHORT).show();
+        } else if (d.canToggle && d.kind != HomeDevice.LOCK && d.kind != HomeDevice.CLIMATE) {
+            boolean on = !d.on;
+            homeAction(d, x -> x.on = on, () -> home.setOn(d, on));
+        } else {
+            openHomeSheet(d);
+        }
+    }
+
+    private interface HomeCall {
+        String run();
+    }
+
+    /** Shows the expected result at once, sends the command, then re-reads the real state. */
+    private void homeAction(HomeDevice d, SmartHome.Change optimistic, HomeCall call) {
+        if (optimistic != null) {
+            home.local(d.id, optimistic);
+            renderHome();
+        }
+        io.execute(() -> {
+            String err = call.run();
+            ui.post(() -> {
+                if (err != null) Toast.makeText(ctx, err, Toast.LENGTH_LONG).show();
+                ui.removeCallbacks(homeRecheck);
+                ui.postDelayed(homeRecheck, err == null ? 1500 : 100);
+            });
+        });
+    }
+
+    private void openHomeSheet(HomeDevice d) {
+        View card = HomeSheet.build(ctx, th, d, new HomeSheet.Actions() {
+            @Override
+            public void setOn(boolean on) {
+                homeAction(d, x -> x.on = on, () -> home.setOn(d, on));
+                closeSheet();
+            }
+
+            @Override
+            public void run() {
+                homeAction(d, null, () -> home.runScene(d));
+                closeSheet();
+            }
+
+            @Override
+            public void brightness(int pct) {
+                homeAction(d, x -> {
+                    x.brightness = pct;
+                    x.on = true;
+                }, () -> home.brightness(d, pct));
+                touched();
+            }
+
+            @Override
+            public void colorTemp(int kelvin) {
+                homeAction(d, x -> {
+                    x.tempK = kelvin;
+                    x.on = true;
+                }, () -> home.colorTemp(d, kelvin));
+                touched();
+            }
+
+            @Override
+            public void color(int rgb) {
+                homeAction(d, x -> x.on = true, () -> home.color(d, rgb));
+                touched();
+            }
+
+            @Override
+            public void temperature(double t) {
+                homeAction(d, x -> x.target = t, () -> home.temperature(d, t));
+                touched();
+            }
+
+            @Override
+            public void touched() {
+                ui.removeCallbacks(autoCloseSheet);
+                ui.postDelayed(autoCloseSheet, 30_000);
+            }
+        });
+        openSheet(card);
+    }
+
+    // ---------------------------------------------------------------- sheet (detail cards and menus)
+
+    private void openSheet(View body) {
+        if (sheet != null) removeView(sheet);
+        performHapticFeedback(HapticFeedbackConstants.VIRTUAL_KEY);
+        sheet = new FrameLayout(ctx);
+        sheet.setBackgroundColor(0x99000000);
+        sheet.setOnClickListener(v -> closeSheet());
+
+        ScrollView sv = new ScrollView(ctx);
+        sv.setVerticalScrollBarEnabled(false);
+        sv.setClickable(true);
+        sv.setPadding(px(20), px(18), px(20), px(14));
+        GradientDrawable bg = rounded(th.surface, 22);
+        bg.setStroke(Math.max(1, (int) dp), th.line);
+        sv.setBackground(bg);
+        sv.setElevation(12 * dp);
+        sv.addView(body);
+
+        int w = Math.min(px(420), (int) (getWidth() * 0.6f));
+        FrameLayout.LayoutParams lp = new FrameLayout.LayoutParams(w, -2, Gravity.CENTER);
+        lp.setMargins(0, px(16) + cutT, 0, px(16) + cutB);
+        sheet.addView(sv, lp);
+        sheet.setAlpha(0f);
+        addView(sheet, new LayoutParams(-1, -1));
+        sheet.animate().alpha(1f).setDuration(160).start();
+        ui.removeCallbacks(autoCloseSheet);
+        ui.postDelayed(autoCloseSheet, 30_000);
+    }
+
+    private final Runnable autoCloseSheet = this::closeSheet;
+
+    private void closeSheet() {
+        ui.removeCallbacks(autoCloseSheet);
+        if (sheet == null) return;
+        View s = sheet;
+        sheet = null;
+        s.animate().alpha(0f).setDuration(140).withEndAction(() -> removeView(s)).start();
+    }
+
+    /** A list of tappable rows for menus. */
+    private LinearLayout menu(String title) {
+        LinearLayout list = vertical();
+        TextView t = text(th.text, 18);
+        t.setText(title);
+        t.setTypeface(Typeface.create("sans-serif-medium", Typeface.NORMAL));
+        list.addView(t, margins(-1, -2, 0, 0, 0, 10));
+        return list;
+    }
+
+    private void menuRow(LinearLayout list, String label, boolean selected, Runnable action) {
+        TextView r = text(selected ? th.accent : th.text, 15);
+        r.setText(label);
+        r.setPadding(px(14), px(12), px(14), px(12));
+        r.setBackground(rounded(selected ? DashTheme.blend(th.surface, th.accent, 0.22f) : th.bg, 14));
+        r.setOnClickListener(v -> action.run());
+        list.addView(r, margins(-1, -2, 0, 0, 0, 6));
+    }
+
+    private void openSettings() {
+        host.open(SettingsActivity.class);
+    }
+
+    private void openMenu() {
+        LinearLayout m = menu("DeskDash");
+        menuRow(m, "Столы и блоки…", false, () -> {
+            closeSheet();
+            host.open(DeskEditorActivity.class);
+        });
+        List<Profiles.Profile> ps = Profiles.list(ctx);
+        if (ps.size() > 1) menuRow(m, "Профиль: " + Profiles.name(ctx, Profiles.active(ctx)) + "…", false, this::openProfiles);
+        menuRow(m, "Настройки", false, () -> {
+            closeSheet();
+            openSettings();
+        });
+        openSheet(m);
+    }
+
+    private void openProfiles() {
+        LinearLayout m = menu("Кто за столом?");
+        String act = Profiles.active(ctx);
+        for (Profiles.Profile p : Profiles.list(ctx)) {
+            menuRow(m, p.name, p.id.equals(act), () -> switchProfile(p.id));
+        }
+        menuRow(m, "Добавить или изменить профили…", false, () -> {
+            closeSheet();
+            openSettings();
+        });
+        openSheet(m);
+    }
+
+    /** Everything belongs to the profile: rebuild with its settings, PC and smart home. */
+    private void switchProfile(String id) {
+        closeSheet();
+        if (id.equals(Profiles.active(ctx))) return;
+        boolean was = running;
+        stop();
+        Profiles.setActive(ctx, id);
+        loadMacroCache();
+        pc = null;
+        pcStats = null;
+        spState = null;
+        pcSpotify = false;
+        pcOnline = false;
+        pcFails = 0;
+        pcInfoAt = 0;
+        pcName = "";
+        home.clear();
+        build();
+        if (was) start();
+        flashBarLabel(Profiles.name(ctx, id));
+    }
+
+    // ---------------------------------------------------------------- desk bar
+
+    /** Pill at the bottom: profile name, one dot per desk, menu button. */
+    private void buildBar(int di, boolean noOtherMenu) {
+        List<Profiles.Profile> ps = Profiles.list(ctx);
+        if (deskCount < 2 && ps.size() < 2 && !noOtherMenu) return;
+        LinearLayout bar = new LinearLayout(ctx);
+        bar.setGravity(Gravity.CENTER_VERTICAL);
+        bar.setPadding(px(10), 0, px(2), 0);
+        bar.setBackground(rounded(th.surface, 14));
+        bar.setAlpha(0.9f);
+        bar.setOnLongClickListener(v -> {
+            openMenu();
+            return true;
+        });
+        if (ps.size() > 1) {
+            TextView who = text(th.dim, 12);
+            who.setText(Profiles.name(ctx, Profiles.active(ctx)));
+            who.setSingleLine();
+            who.setPadding(px(2), px(6), px(8), px(6));
+            who.setOnClickListener(v -> openProfiles());
+            bar.addView(who);
+        }
+        if (deskCount > 1) {
+            for (int i = 0; i < deskCount; i++) {
+                FrameLayout hit = new FrameLayout(ctx);
+                View dot = new View(ctx);
+                GradientDrawable g = new GradientDrawable();
+                g.setShape(GradientDrawable.OVAL);
+                g.setColor(i == di ? th.accent : DashTheme.blend(th.line, th.dim, 0.5f));
+                dot.setBackground(g);
+                hit.addView(dot, new FrameLayout.LayoutParams(px(7), px(7), Gravity.CENTER));
+                int idx = i;
+                hit.setOnClickListener(v -> goDesk(idx, idx > curDesk ? 1 : -1));
+                bar.addView(hit, new LinearLayout.LayoutParams(px(18), px(26)));
+            }
+        }
+        barLabel = text(th.text, 12);
+        barLabel.setSingleLine();
+        barLabel.setVisibility(GONE);
+        barLabel.setPadding(px(6), 0, px(2), 0);
+        bar.addView(barLabel);
+        ImageView more = iconButton(R.drawable.ic_more, th.dim, 26);
+        more.setOnClickListener(v -> openMenu());
+        bar.addView(more, new LinearLayout.LayoutParams(px(26), px(26)));
+        FrameLayout.LayoutParams lp = new FrameLayout.LayoutParams(-2, -2, Gravity.BOTTOM | Gravity.CENTER_HORIZONTAL);
+        lp.bottomMargin = cutB + px(4);
+        addView(bar, lp);
+    }
+
+    private void goDesk(int index, int dir) {
+        if (index == curDesk || index < 0 || index >= deskCount) return;
+        performHapticFeedback(HapticFeedbackConstants.VIRTUAL_KEY);
+        prefs.setDeskIndex(index);
+        build();
+        if (content != null) {
+            content.setTranslationX(dir * getWidth() * 0.25f);
+            content.setAlpha(0f);
+            content.animate().translationX(0).alpha(1f).setDuration(220).start();
+        }
+        flashBarLabel(deskName);
+        ui.removeCallbacks(homeRecheck);
+        ui.post(homeRecheck);
+    }
+
+    private final Runnable hideBarLabel = () -> {
+        if (barLabel != null) barLabel.setVisibility(GONE);
+    };
+
+    private void flashBarLabel(String s) {
+        if (s.isEmpty()) return;
+        if (barLabel == null) {
+            Toast.makeText(ctx, s, Toast.LENGTH_SHORT).show();
+            return;
+        }
+        barLabel.setText(s);
+        barLabel.setVisibility(VISIBLE);
+        ui.removeCallbacks(hideBarLabel);
+        ui.postDelayed(hideBarLabel, 1800);
     }
 
     // ---------------------------------------------------------------- helpers
