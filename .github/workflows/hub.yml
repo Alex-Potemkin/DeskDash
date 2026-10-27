@@ -1,0 +1,26 @@
+name: Hub
+
+on:
+  push:
+    branches: [main]
+    paths: ["hub/**", ".github/workflows/hub.yml"]
+  workflow_dispatch:
+
+jobs:
+  test:
+    runs-on: ubuntu-22.04
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Smoke test (fake Home Assistant and PC agent)
+        timeout-minutes: 3
+        run: python3 hub/ci_smoke.py
+
+      - name: Test hub/install.sh (systemd service)
+        timeout-minutes: 3
+        run: |
+          bash hub/install.sh
+          for i in $(seq 1 30); do curl -sf http://127.0.0.1:8780/api/ping && break; sleep 1; done
+          curl -sf http://127.0.0.1:8780/api/ping | grep deskdash-hub
+          curl -sf http://127.0.0.1:8780/ | grep -q DeskDash
+          systemctl is-active deskdash-hub

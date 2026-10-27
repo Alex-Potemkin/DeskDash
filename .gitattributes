@@ -4,3 +4,4 @@ gradlew text eol=lf
 linux/install.sh text eol=lf
 *.py text eol=lf
 *.yml text eol=lf
+hub/install.sh text eol=lf

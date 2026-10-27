@@ -1,0 +1,52 @@
+<!doctype html>
+<html lang="ru">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<meta name="theme-color" content="#17120F">
+<meta name="apple-mobile-web-app-capable" content="yes">
+<meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
+<title>DeskDash Дом</title>
+<link rel="manifest" href="manifest.webmanifest">
+<link rel="icon" href="icon.svg" type="image/svg+xml">
+<link rel="apple-touch-icon" href="icon.svg">
+<link rel="stylesheet" href="app.css">
+</head>
+<body>
+<div id="login" class="login" hidden>
+  <div class="login-card">
+    <div class="logo">⌂</div>
+    <h1>DeskDash Дом</h1>
+    <p class="muted">Введи токен доступа. Его показывает хаб при запуске или выдаёт администратор в «Настройки → Доступ».</p>
+    <input id="login-token" placeholder="Токен" autocomplete="off" autocapitalize="off" spellcheck="false">
+    <button id="login-go" class="primary">Войти</button>
+    <p id="login-err" class="err"></p>
+  </div>
+</div>
+
+<div id="app" hidden>
+  <header>
+    <div>
+      <div id="hub-name" class="title">Дом</div>
+      <div id="status" class="muted small"></div>
+    </div>
+    <button id="refresh" class="icon-btn" title="Обновить">↻</button>
+  </header>
+  <div id="errors"></div>
+  <main id="view"></main>
+  <nav id="tabs">
+    <button data-tab="home" class="on"><span>⌂</span>Дом</button>
+    <button data-tab="scenes"><span>✦</span>Сценарии</button>
+    <button data-tab="pcs"><span>▭</span>Компьютеры</button>
+    <button data-tab="nas"><span>◫</span>Сервер</button>
+    <button data-tab="settings" id="tab-settings" hidden><span>⚙</span>Настройки</button>
+  </nav>
+</div>
+
+<div id="sheet-bg" hidden></div>
+<div id="sheet" hidden></div>
+<div id="toast" hidden></div>
+
+<script src="app.js"></script>
+</body>
+</html>

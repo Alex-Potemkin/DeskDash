@@ -8,7 +8,8 @@ import java.util.List;
 import java.util.Map;
 
 /**
- * State of Home Assistant + Yandex devices for the dashboard. poll() and the actions run on a
+ * State of Home Assistant + Yandex devices for the dashboard, or of everything the DeskDash Hub offers
+ * when one is set (then the hub talks to both services and the dashboard only to the hub). poll() and the actions run on a
  * background thread; local() runs on the UI thread so a tile reacts before the server answers.
  */
 final class SmartHome {
@@ -24,14 +25,14 @@ final class SmartHome {
     private final Map<String, Long> holds = new HashMap<>();
     private List<HomeDevice> yaCache = new ArrayList<>();
     private long yaAt;
-    private volatile String haError, yaError;
+    private volatile String haError, yaError, hubError;
 
     SmartHome(Prefs p) {
         prefs = p;
     }
 
     static boolean configured(Prefs p) {
-        return HomeAssistant.configured(p) || YandexHome.configured(p);
+        return HubClient.configured(p) || HomeAssistant.configured(p) || YandexHome.configured(p);
     }
 
     Map<String, HomeDevice> devices() {
@@ -40,6 +41,7 @@ final class SmartHome {
 
     /** Connection problems, or null when everything answered. */
     String error() {
+        if (HubClient.configured(prefs)) return hubError == null ? null : "Хаб: " + hubError;
         String h = haError, y = yaError;
         if (h == null) return y == null ? null : "Яндекс: " + y;
         return "Home Assistant: " + h + (y == null ? "" : "\nЯндекс: " + y);
@@ -54,11 +56,16 @@ final class SmartHome {
             yaAt = 0;
             haError = null;
             yaError = null;
+            hubError = null;
         }
     }
 
     /** Fetches fresh state. Yandex is asked at most every 15 s unless forced. */
     void poll(boolean forceYandex) {
+        if (HubClient.configured(prefs)) {
+            pollHub();
+            return;
+        }
         List<HomeDevice> ha = null, ya = null;
         if (HomeAssistant.configured(prefs)) {
             try {
@@ -101,6 +108,27 @@ final class SmartHome {
         }
     }
 
+    private void pollHub() {
+        List<HomeDevice> l;
+        try {
+            l = new HubClient(prefs).devices();
+            hubError = null;
+        } catch (Exception e) {
+            hubError = msg(e);
+            return;
+        }
+        synchronized (lock) {
+            Map<String, HomeDevice> old = devices, next = new LinkedHashMap<>();
+            for (HomeDevice d : l) next.put(d.id, d);
+            long now = System.currentTimeMillis();
+            for (Map.Entry<String, Long> h : new ArrayList<>(holds.entrySet())) {
+                if (now < h.getValue() && old.containsKey(h.getKey()) && next.containsKey(h.getKey())) next.put(h.getKey(), old.get(h.getKey()));
+                else holds.remove(h.getKey());
+            }
+            devices = next;
+        }
+    }
+
     /** Changes a device locally right away and keeps that state for a few seconds against stale polls. */
     void local(String id, Change change) {
         synchronized (lock) {
@@ -127,6 +155,7 @@ final class SmartHome {
 
     /** Each returns null on success or an error message. */
     String setOn(HomeDevice d, boolean on) {
+        if (HubClient.configured(prefs)) return run(d, () -> new HubClient(prefs).act(d, on ? "on" : "off", null));
         return run(d, () -> {
             if (ha(d)) new HomeAssistant(prefs).setOn(d, on);
             else new YandexHome(prefs).setOn(d, on);
@@ -134,6 +163,7 @@ final class SmartHome {
     }
 
     String runScene(HomeDevice d) {
+        if (HubClient.configured(prefs)) return run(d, () -> new HubClient(prefs).act(d, "run", null));
         return run(d, () -> {
             if (ha(d)) new HomeAssistant(prefs).run(d);
             else new YandexHome(prefs).run(d);
@@ -141,6 +171,7 @@ final class SmartHome {
     }
 
     String brightness(HomeDevice d, int pct) {
+        if (HubClient.configured(prefs)) return run(d, () -> new HubClient(prefs).act(d, "brightness", pct));
         return run(d, () -> {
             if (ha(d)) new HomeAssistant(prefs).brightness(d, pct);
             else new YandexHome(prefs).brightness(d, pct);
@@ -148,6 +179,7 @@ final class SmartHome {
     }
 
     String colorTemp(HomeDevice d, int k) {
+        if (HubClient.configured(prefs)) return run(d, () -> new HubClient(prefs).act(d, "color_temp", k));
         return run(d, () -> {
             if (ha(d)) new HomeAssistant(prefs).colorTemp(d, k);
             else new YandexHome(prefs).colorTemp(d, k);
@@ -155,6 +187,7 @@ final class SmartHome {
     }
 
     String color(HomeDevice d, int rgb) {
+        if (HubClient.configured(prefs)) return run(d, () -> new HubClient(prefs).act(d, "color", rgb & 0xFFFFFF));
         return run(d, () -> {
             if (ha(d)) new HomeAssistant(prefs).color(d, rgb);
             else new YandexHome(prefs).color(d, rgb);
@@ -162,6 +195,7 @@ final class SmartHome {
     }
 
     String temperature(HomeDevice d, double t) {
+        if (HubClient.configured(prefs)) return run(d, () -> new HubClient(prefs).act(d, "temperature", t));
         return run(d, () -> {
             if (ha(d)) new HomeAssistant(prefs).temperature(d, t);
             else new YandexHome(prefs).temperature(d, t);
@@ -192,6 +226,16 @@ final class SmartHome {
     /** Everything both services offer, grouped by room; problems go into errors. Blocking. */
     static List<HomeDevice> listAll(Prefs p, StringBuilder errors) {
         List<HomeDevice> out = new ArrayList<>();
+        if (HubClient.configured(p)) {
+            try {
+                List<HomeDevice> l = new HubClient(p).devices();
+                sort(l);
+                out.addAll(l);
+            } catch (Exception e) {
+                errors.append("Хаб: ").append(msg(e)).append('\n');
+            }
+            return out;
+        }
         if (HomeAssistant.configured(p)) {
             try {
                 HomeAssistant h = new HomeAssistant(p);

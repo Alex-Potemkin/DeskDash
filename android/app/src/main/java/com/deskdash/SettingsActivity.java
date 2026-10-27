@@ -33,7 +33,7 @@ public class SettingsActivity extends Activity {
     private LinearLayout list;
     private float dp;
     private final List<Runnable> savers = new ArrayList<>();
-    private EditText hostE, portE, tokenE;
+    private EditText hostE, portE, tokenE, hubE, hubTokenE;
 
     @Override
     protected void onCreate(Bundle state) {
@@ -101,6 +101,17 @@ public class SettingsActivity extends Activity {
         button("Найти ПК в сети", v -> discover());
         button("Проверить соединение", v -> test());
         note("На ПК запусти DeskDash.exe. Кнопки-макросы настраиваются там во вкладке «Макросы» и сами появятся на экране.");
+
+        section("Хаб (Raspberry Pi)");
+        hubE = edit("hub_url", "Адрес хаба, например 192.168.1.5", InputType.TYPE_CLASS_TEXT | InputType.TYPE_TEXT_VARIATION_URI, false);
+        hubTokenE = edit("hub_token", "Токен доступа к хабу", InputType.TYPE_CLASS_TEXT | InputType.TYPE_TEXT_FLAG_NO_SUGGESTIONS, false);
+        button("Найти хаб в сети", v -> discoverHub());
+        button("Проверить хаб", v -> testHub());
+        button("Перенести умный дом и ПК на хаб", v -> importToHub());
+        note("Хаб держит входы в Home Assistant и Яндекс, следит за компьютерами и запускает общие сценарии. "
+                + "Когда он указан, блок «Умный дом» берёт всё с хаба: устройства, сценарии хаба, макросы и пробуждение ПК. "
+                + "С телефона тем же хабом управляют через браузер: адрес хаба → «Добавить на главный экран». "
+                + "Перенос отдаёт хабу вход в Home Assistant, Яндекс и ПК из этого профиля (нужен токен администратора).");
 
         section("Умный дом: Home Assistant");
         edit("ha_url", "Адрес, например http://192.168.1.20:8123", InputType.TYPE_CLASS_TEXT | InputType.TYPE_TEXT_VARIATION_URI, false);
@@ -261,6 +272,69 @@ public class SettingsActivity extends Activity {
             try {
                 java.util.List<HomeDevice> l = ha ? new HomeAssistant(prefs).states() : new YandexHome(prefs).devices();
                 msg = "Работает: " + l.size() + " устройств и сценариев";
+            } catch (Exception e) {
+                msg = "Ошибка: " + SmartHome.msg(e);
+            }
+            String m = msg;
+            runOnUiThread(() -> Toast.makeText(this, m, Toast.LENGTH_LONG).show());
+        }).start();
+    }
+
+    private void discoverHub() {
+        Toast.makeText(this, "Ищу хаб…", Toast.LENGTH_SHORT).show();
+        new Thread(() -> {
+            List<String[]> found = HubClient.discover(1500);
+            runOnUiThread(() -> {
+                if (found.isEmpty()) {
+                    Toast.makeText(this, "Хаб не найден. Он запущен? Телефон в той же сети?", Toast.LENGTH_LONG).show();
+                } else if (found.size() == 1) {
+                    fillHub(found.get(0));
+                } else {
+                    String[] names = new String[found.size()];
+                    for (int i = 0; i < names.length; i++) names[i] = found.get(i)[2] + "  (" + found.get(i)[0] + ")";
+                    new AlertDialog.Builder(this).setTitle("Выбери хаб")
+                            .setItems(names, (d, i) -> fillHub(found.get(i))).show();
+                }
+            });
+        }).start();
+    }
+
+    private void fillHub(String[] r) {
+        hubE.setText("8780".equals(r[1]) ? r[0] : r[0] + ":" + r[1]);
+        Toast.makeText(this, "Найден хаб «" + r[2] + "». Введи токен доступа.", Toast.LENGTH_LONG).show();
+        hubTokenE.requestFocus();
+    }
+
+    private void testHub() {
+        saveAll();
+        if (!HubClient.configured(prefs)) {
+            Toast.makeText(this, "Укажи адрес и токен хаба", Toast.LENGTH_SHORT).show();
+            return;
+        }
+        Toast.makeText(this, "Проверяю…", Toast.LENGTH_SHORT).show();
+        new Thread(() -> {
+            String msg;
+            try {
+                msg = "Работает: " + new HubClient(prefs).devices().size() + " плиток";
+            } catch (Exception e) {
+                msg = "Ошибка: " + SmartHome.msg(e);
+            }
+            String m = msg;
+            runOnUiThread(() -> Toast.makeText(this, m, Toast.LENGTH_LONG).show());
+        }).start();
+    }
+
+    private void importToHub() {
+        saveAll();
+        if (!HubClient.configured(prefs)) {
+            Toast.makeText(this, "Укажи адрес и токен хаба", Toast.LENGTH_SHORT).show();
+            return;
+        }
+        new Thread(() -> {
+            String msg;
+            try {
+                String done = new HubClient(prefs).importSettings(prefs);
+                msg = done.isEmpty() ? "Переносить нечего: в профиле нет входов и ПК" : "Хаб получил: " + done;
             } catch (Exception e) {
                 msg = "Ошибка: " + SmartHome.msg(e);
             }

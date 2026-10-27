@@ -75,6 +75,20 @@ public class Prefs {
         ed.apply();
     }
 
+    /** DeskDash Hub base URL; "http://" and, for plain http, the default port 8780 are added when missing. */
+    public String hubUrl() {
+        String u = sp().getString("hub_url", "").trim();
+        if (u.isEmpty()) return u;
+        if (!u.startsWith("http://") && !u.startsWith("https://")) u = "http://" + u;
+        while (u.endsWith("/")) u = u.substring(0, u.length() - 1);
+        int s = u.indexOf("//") + 2, e = u.indexOf('/', s);
+        if (u.startsWith("http://") && u.substring(s, e < 0 ? u.length() : e).indexOf(':') < 0) {
+            u = e < 0 ? u + ":8780" : u.substring(0, e) + ":8780" + u.substring(e);
+        }
+        return u;
+    }
+    public String hubToken() { return sp().getString("hub_token", "").trim(); }
+
     public String yaClientId() { return sp().getString("ya_client_id", "").trim(); }
     public String yaToken() { return sp().getString("ya_token", "").trim(); }
     public void setYaToken(String t) { sp().edit().putString("ya_token", t).apply(); }
