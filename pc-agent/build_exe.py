@@ -23,7 +23,9 @@ os.makedirs(BUILD, exist_ok=True)
 args = [sys.executable, "-m", "PyInstaller", "--noconfirm", "--clean", "--onefile", "--windowed",
         "--name", "DeskDash",
         "--distpath", os.path.join(BUILD, "dist"), "--workpath", os.path.join(BUILD, "work"),
-        "--specpath", BUILD]
+        "--specpath", BUILD,
+        # stream.py uses OpenCV only when it's around; the exe takes the webcam through ffmpeg instead of +100 MB
+        "--exclude-module", "cv2", "--exclude-module", "numpy"]
 if IS_WIN:
     ico = os.path.join(BUILD, "deskdash.ico")
     make_icon(256).save(ico, sizes=[(16, 16), (24, 24), (32, 32), (48, 48), (64, 64), (256, 256)])

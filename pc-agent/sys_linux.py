@@ -251,5 +251,117 @@ def stats():
     }
 
 
+# ---------------------------------------------------------------- windows, input, devices (calls and day stats)
+
+def _out(args, timeout=3):
+    try:
+        r = subprocess.run(args, capture_output=True, text=True, timeout=timeout)
+        return r.stdout if r.returncode == 0 else ""
+    except (OSError, subprocess.TimeoutExpired):
+        return ""
+
+
+def idle_seconds():
+    """Seconds since the last input: xprintidle on X11, Mutter's idle monitor on GNOME; 0 if unknown."""
+    if _have("xprintidle") and not _wayland():
+        v = _out(["xprintidle"]).strip()
+        if v.isdigit():
+            return int(v) / 1000
+    v = _out(["gdbus", "call", "--session", "--dest", "org.gnome.Mutter.IdleMonitor",
+              "--object-path", "/org/gnome/Mutter/IdleMonitor/Core", "--method",
+              "org.gnome.Mutter.IdleMonitor.GetIdletime"])
+    digits = "".join(c for c in v.split(",")[0] if c.isdigit())
+    return int(digits) / 1000 if digits else 0
+
+
+def cursor():
+    v = _out(["xdotool", "getmouselocation", "--shell"]) if _have("xdotool") else ""
+    kv = dict(line.split("=", 1) for line in v.splitlines() if "=" in line)
+    try:
+        return int(kv["X"]), int(kv["Y"])
+    except (KeyError, ValueError):
+        return None
+
+
+def _exe_of_pid(pid):
+    try:
+        return os.path.basename(os.readlink(f"/proc/{pid}/exe"))
+    except OSError:
+        return ""
+
+
+def foreground():
+    """(exe name, window title) of the active window on X11, ("", "") when unknown."""
+    if not _have("xdotool"):
+        return "", ""
+    v = _out(["xdotool", "getactivewindow", "getwindowpid", "getwindowname"]).splitlines()
+    if len(v) < 2 or not v[0].strip().isdigit():
+        return "", ""
+    return _exe_of_pid(v[0].strip()), v[1]
+
+
+def windows():
+    """[(window id, exe name, title)] via wmctrl (X11 / XWayland)."""
+    out = []
+    for line in _out(["wmctrl", "-lp"]).splitlines() if _have("wmctrl") else []:
+        parts = line.split(None, 4)
+        if len(parts) == 5 and parts[2].isdigit():
+            out.append((parts[0], _exe_of_pid(parts[2]), parts[4]))
+    return out
+
+
+def focus(win):
+    _first(["wmctrl", "-ia", str(win)], ["xdotool", "windowactivate", str(win)])
+    time.sleep(0.25)
+
+
+def device_users(device):
+    """Apps using the "microphone" (PipeWire/PulseAudio recording streams) or the "webcam"
+    (/dev/video* open): {app: unix start, approximate}."""
+    out = {}
+    if device == "microphone":
+        app = None
+        for line in _out(["pactl", "list", "source-outputs"]).splitlines():
+            line = line.strip()
+            if line.startswith("Source Output #"):
+                app = None
+            elif line.startswith("application.process.binary") or (line.startswith("application.name") and app is None):
+                app = line.split("=", 1)[1].strip().strip('"').lower()
+                if app and app not in ("pavucontrol", "gnome-shell", "plasmashell"):
+                    out.setdefault(app, time.time())
+        return out
+    for pid in os.listdir("/proc"):
+        if not pid.isdigit():
+            continue
+        try:
+            fds = os.listdir(f"/proc/{pid}/fd")
+        except OSError:
+            continue
+        for fd in fds:
+            try:
+                if os.readlink(f"/proc/{pid}/fd/{fd}").startswith("/dev/video"):
+                    out.setdefault(_exe_of_pid(pid).lower(), os.stat(f"/proc/{pid}").st_mtime)
+                    break
+            except OSError:
+                continue
+    return out
+
+
+def mic_muted():
+    v = _out(["wpctl", "get-volume", "@DEFAULT_AUDIO_SOURCE@"])
+    if v:
+        return "MUTED" in v
+    v = _out(["pactl", "get-source-mute", "@DEFAULT_SOURCE@"])
+    return ("yes" in v) if v else None
+
+
+def set_mic_muted(on):
+    flag = "1" if on else "0"
+    if not _first(["wpctl", "set-mute", "@DEFAULT_AUDIO_SOURCE@", flag],
+                  ["pactl", "set-source-mute", "@DEFAULT_SOURCE@", flag],
+                  ["amixer", "-q", "sset", "Capture", "nocap" if on else "cap"]):
+        raise RuntimeError("нет wpctl/pactl/amixer для микрофона")
+
+
 def start_background():
     threading.Thread(target=cpu_sampler, daemon=True).start()

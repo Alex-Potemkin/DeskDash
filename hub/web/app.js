@@ -1,8 +1,9 @@
 "use strict";
 // DeskDash Дом: the phone side of the hub. Plain JS, no build step.
 
-const KIND = { SWITCH: 0, LIGHT: 1, CLIMATE: 2, SENSOR: 3, SCENE: 4, COVER: 5, LOCK: 6, FAN: 7, MEDIA: 8 };
-const ICON = ["⏻", "✹", "♨", "◉", "✦", "▤", "⚿", "✇", "♫"];
+const KIND = { SWITCH: 0, LIGHT: 1, CLIMATE: 2, SENSOR: 3, SCENE: 4, COVER: 5, LOCK: 6, FAN: 7, MEDIA: 8,
+  PRINTER: 9, VACUUM: 10, CAMERA: 11, APPLIANCE: 12 };
+const ICON = ["⏻", "✹", "♨", "◉", "✦", "▤", "⚿", "✇", "♫", "⎙", "◍", "◫", "◎"];
 const $ = (s, el = document) => el.querySelector(s);
 
 let token = "";
@@ -229,11 +230,19 @@ function status(d) {
     case KIND.COVER: return d.on ? "Открыто" : "Закрыто";
     case KIND.LOCK: return d.on ? "Заперто" : "Открыто";
     case KIND.MEDIA: return d.state || (d.on ? "Играет" : "Пауза");
+    case KIND.PRINTER:
+    case KIND.APPLIANCE: {
+      if (d.progress < 0 || !d.on) return d.state || "Ожидание";
+      const s = d.progress + "%" + (d.remainingMin >= 0 ? " · " + minutes(d.remainingMin) : "");
+      return d.state === "Пауза" ? "Пауза · " + s : s;
+    }
+    case KIND.VACUUM: return d.state || "—";
     default: return (d.on ? "Вкл" : "Выкл") + (d.state ? " · " + d.state : "");
   }
 }
 
 const deg = v => (Math.round(v * 10) / 10) + "°";
+const minutes = m => { const h = Math.floor(m / 60), r = m % 60; return h && r ? `${h} ч ${r} мин` : h ? `${h} ч` : `${r} мин`; };
 const lit = d => d.available && d.kind !== KIND.SENSOR && d.kind !== KIND.SCENE && d.on;
 
 function tile(d) {
@@ -290,7 +299,8 @@ function openSheet(d) {
   s.innerHTML = "";
   s.append(h("div", { class: "grip" }), h("h3", {}, d.name),
     h("div", { class: "muted" }, [d.room, status(d)].filter(Boolean).join(" · ")));
-  const words = { [KIND.COVER]: ["Открыть", "Закрыть"], [KIND.LOCK]: ["Запереть", "Отпереть"], [KIND.MEDIA]: ["Играть", "Пауза"] }[d.kind]
+  const words = { [KIND.COVER]: ["Открыть", "Закрыть"], [KIND.LOCK]: ["Запереть", "Отпереть"], [KIND.MEDIA]: ["Играть", "Пауза"],
+    [KIND.VACUUM]: ["Убрать", "На базу"] }[d.kind]
     || ["Включить", "Выключить"];
   const btns = h("div", { class: "btns" });
   if (d.kind === KIND.SCENE) btns.append(h("button", { class: "primary", onclick: () => { act(d, "run", null, `Запускаю «${d.name}»`); closeSheet(); } }, "Запустить"));
@@ -298,6 +308,10 @@ function openSheet(d) {
     h("button", { class: d.on ? "ghost" : "primary", onclick: () => act(d, "on") }, words[0]),
     h("button", { class: d.on ? "primary" : "ghost", onclick: () => act(d, "off") }, words[1]));
   s.append(btns);
+  if (d.job || d.detail) s.append(h("div", { class: "muted", style: "white-space:pre-line;margin-top:8px" }, [d.job, d.detail].filter(Boolean).join("\n")));
+  const cmds = [["resume", "Продолжить"], ["pause", "Пауза"], ["stop", "Остановить"], ["light", "Подсветка"]].filter(([k]) => d.cmds && d.cmds[k]);
+  if (cmds.length) s.append(h("div", { class: "btns" }, cmds.map(([k, label]) =>
+    h("button", { class: "ghost", onclick: () => { if (k !== "stop" || confirm("Остановить?")) { act(d, k); closeSheet(); } } }, label))));
 
   if (d.dimmable) {
     s.append(h("label", { class: "f" }, "Яркость"),

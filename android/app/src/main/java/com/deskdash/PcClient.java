@@ -27,6 +27,23 @@ public class PcClient {
         public String name = "", mac = "", macrosJson = "[]";
         public List<Macro> macros = new ArrayList<>();
         public boolean spotify;
+        /** What this DeskDash.exe can do: "calls", "day", "stream", "bambu" (older versions: none). */
+        public String features = "";
+    }
+
+    /** A call running on the PC (pc-agent/calls.py). */
+    public static class Call {
+        public String id = "", name = "", title = "";
+        public int color;
+        public long since;
+        public boolean camera;
+        public List<String> actions = new ArrayList<>();
+    }
+
+    public static class Calls {
+        public List<Call> calls = new ArrayList<>();
+        /** null when the PC has no microphone. */
+        public Boolean micMuted;
     }
 
     public static class SpDevice {
@@ -56,6 +73,8 @@ public class PcClient {
         i.name = o.optString("name", "");
         i.mac = o.optString("mac", "");
         i.spotify = o.optBoolean("spotify", false);
+        JSONArray f = o.optJSONArray("features");
+        i.features = f == null ? "" : f.toString();
         JSONArray a = o.optJSONArray("macros");
         if (a != null) {
             i.macrosJson = a.toString();
@@ -75,6 +94,67 @@ public class PcClient {
         } catch (IOException | JSONException e) {
             return false;
         }
+    }
+
+    public String base() {
+        return base;
+    }
+
+    public String token() {
+        return token;
+    }
+
+    public Calls calls() throws IOException, JSONException {
+        return parseCalls(new JSONObject(Net.request("GET", base + "/api/calls", token, 3000)));
+    }
+
+    /** mute / unmute / mute_toggle / show / camera / share / hand / leave / deafen. Returns the PC's note. */
+    public String callAction(String action, String callId) throws IOException, JSONException {
+        JSONObject o = new JSONObject(Net.request("POST", base + "/api/calls/" + action + "?call=" + enc(callId), token, 6000));
+        if (!o.optBoolean("ok")) throw new IOException(o.optString("error", "не получилось"));
+        return o.optString("note", "");
+    }
+
+    static Calls parseCalls(JSONObject o) {
+        Calls c = new Calls();
+        c.micMuted = o.isNull("mic_muted") ? null : o.optBoolean("mic_muted");
+        JSONArray a = o.optJSONArray("calls");
+        for (int i = 0; a != null && i < a.length(); i++) {
+            JSONObject x = a.optJSONObject(i);
+            if (x == null) continue;
+            Call k = new Call();
+            k.id = x.optString("id");
+            k.name = x.optString("name");
+            k.title = x.optString("title");
+            k.since = x.optLong("since") * 1000L;
+            k.camera = x.optBoolean("camera");
+            try {
+                k.color = android.graphics.Color.parseColor(x.optString("color", "#8A8A8A"));
+            } catch (IllegalArgumentException e) {
+                k.color = 0xFF8A8A8A;
+            }
+            JSONArray acts = x.optJSONArray("actions");
+            for (int j = 0; acts != null && j < acts.length(); j++) k.actions.add(acts.optString(j));
+            c.calls.add(k);
+        }
+        return c;
+    }
+
+    /** Day stats of the PC (pc-agent/daystats.py): active minutes by hour, apps, calls, the week. */
+    public JSONObject day() throws IOException, JSONException {
+        return new JSONObject(Net.request("GET", base + "/api/day", token, 4000));
+    }
+
+    /** Opens a meeting link on the PC. */
+    public void open(String url) throws IOException, JSONException {
+        JSONObject o = new JSONObject(Net.request("POST", base + "/api/open", token,
+                new JSONObject().put("url", url).toString(), 5000));
+        if (!o.optBoolean("ok")) throw new IOException(o.optString("error", "не получилось"));
+    }
+
+    /** Bambu Lab printers the PC sees, with access codes from Bambu Studio. */
+    public JSONArray bambu() throws IOException, JSONException {
+        return new JSONObject(Net.request("GET", base + "/api/bambu", token, 15000)).optJSONArray("printers");
     }
 
     public SpState spotifyState() throws IOException, JSONException {

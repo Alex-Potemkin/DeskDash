@@ -8,6 +8,9 @@ public class CalEvent {
     public final boolean allDay;
     public String location = "";
     public String calendar = "";
+    /** Description and the event's own URL: where meeting links usually are. */
+    public String description = "";
+    public String url = "";
     /** Colour from Google Calendar, 0 when the source has none (ICS). */
     public int color;
 

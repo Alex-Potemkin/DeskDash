@@ -265,6 +265,10 @@ class Hub:
         elif action == "temperature":
             api.temperature(d, value)
             local = {"target": float(value)}
+        elif action in ("pause", "resume", "stop", "light"):
+            if not hasattr(api, "command"):
+                raise ProviderError("у устройства нет такой кнопки")
+            api.command(d, action)
         else:
             raise ProviderError(f"неизвестное действие {action}")
         if local:

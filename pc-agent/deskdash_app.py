@@ -801,6 +801,9 @@ class SettingsPage(tk.Frame):
                                               self._autostart))
         row(4, "Кнопка «закрыть»", lambda p: Toggle(p, "сворачивает в трей", cfg.get("tray_on_close", True),
                                                     lambda v: self._set("tray_on_close", v)))
+        row(5, "Экран на телефоне", lambda p: Toggle(p, "можно смотреть экран и камеру", cfg.get("stream", True),
+                                                     lambda v: self._set("stream", v)),
+            "во время созвонов: экран ПК с вебкой поверх")
 
         link(self, "открыть папку с настройками", lambda: agent.sysapi.open_target(agent.DATA_DIR), FAINT, DIM, 9).pack(
             anchor="w", pady=(10, 0))

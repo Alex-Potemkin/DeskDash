@@ -157,6 +157,25 @@ public class DashboardView extends FrameLayout {
     private volatile long pcInfoAt;
     private String pcName = "";
 
+    // calls, day stats, live strip
+    private volatile PcClient.Calls pcCalls;
+    private volatile String pcFeatures = "";
+    private volatile JSONObject pcDay;
+    private volatile long pcDayAt;
+    private CallPanel callPanel;
+    private StatsPanel statsPanel;
+    private String callsSig = "";
+    private LinearLayout live;
+    private TextView liveText;
+    private View liveDot;
+    private String liveFlash;
+    private long liveFlashUntil, bambuEventSeen = System.currentTimeMillis();
+    private Runnable liveAction;
+    private final Map<String, Bitmap> pics = new HashMap<>();
+    private final Map<String, Long> picAt = new HashMap<>();
+    private int musicSec, musicTracks, musicTick;
+    private String musicTrack = "";
+
     // smart home
     private final SmartHome home;
     private final AtomicBoolean homeBusy = new AtomicBoolean();
@@ -165,6 +184,7 @@ public class DashboardView extends FrameLayout {
 
     // desks
     private int deskCount = 1, curDesk;
+    private boolean hasBar;
     private String deskName = "";
     private final List<View> hOwners = new ArrayList<>(); // views with their own horizontal swipes
     private TextView barLabel;
@@ -234,6 +254,7 @@ public class DashboardView extends FrameLayout {
         running = true;
         pc = prefs.pcHost().isEmpty() ? null : new PcClient(prefs.pcHost(), prefs.pcPort(), prefs.pcToken());
         pcOnline = false;
+        Bambu.sync(prefs);
         music.start();
         lastMinute = -1;
         ui.post(secondTick);
@@ -257,6 +278,8 @@ public class DashboardView extends FrameLayout {
         ui.removeCallbacks(pcPoll);
         ui.removeCallbacks(homePoll);
         ui.removeCallbacks(reloadCal);
+        flushMusic();
+        Bambu.stopAll();
         music.stop();
         try {
             ctx.getContentResolver().unregisterContentObserver(calObserver);
@@ -351,6 +374,10 @@ public class DashboardView extends FrameLayout {
         renderMacros();
         renderPc();
         renderHome();
+        buildLive();
+        callsSig = "";
+        renderCalls();
+        renderStats();
     }
 
     /** Block views of the previous desk; every render method skips blocks that aren't on screen. */
@@ -366,6 +393,9 @@ public class DashboardView extends FrameLayout {
         timeline = null;
         monthView = null;
         barLabel = null;
+        callPanel = null;
+        statsPanel = null;
+        live = null;
         homePanels.clear();
         hOwners.clear();
     }
@@ -377,6 +407,8 @@ public class DashboardView extends FrameLayout {
             case "pc": return buildPc();
             case "calendar": return buildCalendar();
             case "home": return buildHome(b);
+            case "calls": return buildCalls();
+            case "stats": return buildStats();
             default: return null;
         }
     }
@@ -653,6 +685,9 @@ public class DashboardView extends FrameLayout {
             if (!running) return;
             tickClock();
             updateProgress();
+            countMusic();
+            if (callPanel != null) callPanel.tick();
+            renderLive();
             LocalTime t = LocalTime.now();
             int m = t.getHour() * 60 + t.getMinute();
             if (m != lastMinute) {
@@ -682,6 +717,7 @@ public class DashboardView extends FrameLayout {
             content.animate().translationX((rnd.nextFloat() * 10 - 5) * dp).translationY((rnd.nextFloat() * 8 - 4) * dp).setDuration(2000).start();
         }
         if (idle && !monthMode && shownDay.equals(now)) scrollToNow(true);
+        renderStats();
     }
 
     private void tickClock() {
@@ -968,6 +1004,8 @@ public class DashboardView extends FrameLayout {
             }
             ui.post(() -> {
                 todayEvents = todayList;
+                renderCalls();
+                renderStats();
                 if (month == monthMode && day.equals(shownDay) && ym.equals(shownMonth)) {
                     viewEvents = view;
                     renderCalendar();
@@ -1628,7 +1666,34 @@ public class DashboardView extends FrameLayout {
             JSONObject st = c.stats();
             boolean spOn = info != null ? info.spotify : pcSpotify;
             PcClient.SpState sp = spOn && pollCount++ % 3 == 0 ? fetchSpotify(c) : null;
+            String feats = info != null ? info.features : pcFeatures;
+            PcClient.Calls calls = null;
+            if (feats.contains("calls") && (callPanel != null || prefs.live())) {
+                try {
+                    calls = c.calls();
+                } catch (Exception ignored) {
+                    // a hiccup: keep the last state
+                }
+            }
+            JSONObject day = null;
+            if (feats.contains("day") && statsPanel != null && System.currentTimeMillis() - pcDayAt > 60_000) {
+                try {
+                    day = c.day();
+                    pcDayAt = System.currentTimeMillis();
+                } catch (Exception ignored) {
+                    // try again next minute
+                }
+            }
+            PcClient.Calls callsNow = calls;
+            JSONObject dayNow = day;
             ui.post(() -> {
+                pcFeatures = feats;
+                if (callsNow != null) pcCalls = callsNow;
+                if (dayNow != null) {
+                    pcDay = dayNow;
+                    renderStats();
+                }
+                renderCalls();
                 pcFails = 0;
                 boolean was = pcOnline;
                 pcOnline = true;
@@ -1657,8 +1722,10 @@ public class DashboardView extends FrameLayout {
                 if (++pcFails >= 2 && pcOnline) {
                     pcOnline = false;
                     spState = null;
+                    pcCalls = null;
                     renderMacros();
                     renderMusic();
+                    renderCalls();
                 }
                 renderPc();
             });
@@ -1825,6 +1892,11 @@ public class DashboardView extends FrameLayout {
             public void onSetup() {
                 host.open(SmartHome.configured(prefs) ? DeskEditorActivity.class : SettingsActivity.class);
             }
+
+            @Override
+            public Bitmap image(HomeDevice d) {
+                return homeImage(d);
+            }
         });
         homePanels.add(p);
         return p;
@@ -1834,6 +1906,40 @@ public class DashboardView extends FrameLayout {
         boolean on = SmartHome.configured(prefs);
         String err = home.error();
         for (HomePanel p : homePanels) p.render(home.devices(), on, err);
+        String ev = Bambu.recentEvent(bambuEventSeen);
+        if (ev != null) {
+            bambuEventSeen = System.currentTimeMillis();
+            flashLive(ev);
+        }
+    }
+
+    /** Camera and printer pictures: Bambu frames straight from the printer, others over http every few seconds. */
+    private Bitmap homeImage(HomeDevice d) {
+        if (d.image.startsWith("bambu:")) return Bambu.frame(d.image.substring(6));
+        String key = d.id, url = d.image;
+        Long at = picAt.get(key);
+        long now = System.currentTimeMillis();
+        if (at == null || now - at > 4000) {
+            picAt.put(key, now);
+            io.execute(() -> {
+                try {
+                    HttpURLConnection c = (HttpURLConnection) new URL(url).openConnection();
+                    c.setConnectTimeout(4000);
+                    c.setReadTimeout(6000);
+                    try (InputStream in = c.getInputStream()) {
+                        BitmapFactory.Options o = new BitmapFactory.Options();
+                        o.inSampleSize = 2;
+                        Bitmap b = BitmapFactory.decodeStream(in, null, o);
+                        if (b != null) ui.post(() -> pics.put(key, b));
+                    } finally {
+                        c.disconnect();
+                    }
+                } catch (Exception ignored) {
+                    // offline camera: keep the last picture
+                }
+            });
+        }
+        return pics.get(key);
     }
 
     private final Runnable homePoll = new Runnable() {
@@ -1846,7 +1952,7 @@ public class DashboardView extends FrameLayout {
     };
 
     private void pollHome(boolean forceYandex) {
-        if (homePanels.isEmpty() || !SmartHome.configured(prefs) || !homeBusy.compareAndSet(false, true)) return;
+        if (homePanels.isEmpty() && !prefs.live() || !SmartHome.configured(prefs) || !homeBusy.compareAndSet(false, true)) return;
         io.execute(() -> {
             try {
                 home.poll(forceYandex);
@@ -1879,6 +1985,7 @@ public class DashboardView extends FrameLayout {
 
     /** Shows the expected result at once, sends the command, then re-reads the real state. */
     private void homeAction(HomeDevice d, SmartHome.Change optimistic, HomeCall call) {
+        DayStats.add(ctx, "home", 1);
         if (optimistic != null) {
             home.local(d.id, optimistic);
             renderHome();
@@ -1938,12 +2045,342 @@ public class DashboardView extends FrameLayout {
             }
 
             @Override
+            public void command(String action) {
+                homeAction(d, null, () -> home.command(d, action));
+                closeSheet();
+            }
+
+            @Override
+            public Bitmap image(HomeDevice x) {
+                return homeImage(x);
+            }
+
+            @Override
             public void touched() {
                 ui.removeCallbacks(autoCloseSheet);
                 ui.postDelayed(autoCloseSheet, 30_000);
             }
         });
         openSheet(card);
+    }
+
+    // ---------------------------------------------------------------- calls
+
+    private View buildCalls() {
+        callPanel = new CallPanel(ctx, th, new CallPanel.Listener() {
+            @Override
+            public void onJoin(Meetings.Meeting m, boolean onPc) {
+                joinMeeting(m, onPc);
+            }
+
+            @Override
+            public void onCallAction(PcClient.Call c, String action) {
+                callAction(c, action);
+            }
+
+            @Override
+            public void onScreen() {
+                host.open(StreamActivity.class);
+            }
+
+            @Override
+            public void onSetup() {
+                openSettings();
+            }
+        });
+        return callPanel;
+    }
+
+    /** Re-draws the calls block only when something changed; timers tick on their own. */
+    private void renderCalls() {
+        if (callPanel == null) return;
+        List<Meetings.Meeting> today = Meetings.all(todayEvents);
+        PcClient.Calls live = pcOnline ? pcCalls : null;
+        boolean stream = pcOnline && pcFeatures.contains("stream");
+        StringBuilder sig = new StringBuilder().append(pcOnline).append(stream);
+        long now = System.currentTimeMillis();
+        for (Meetings.Meeting m : today) {
+            sig.append('|').append(m.event.start).append(m.event.title).append(m.event.end <= now)
+                    .append(m.event.start - now <= prefs.callRemind() * 60_000L);
+        }
+        if (live != null) {
+            sig.append('#').append(live.micMuted);
+            for (PcClient.Call c : live.calls) sig.append(c.id).append(c.camera).append(c.title).append(c.since);
+        }
+        if (sig.toString().equals(callsSig)) return;
+        callsSig = sig.toString();
+        callPanel.render(today, live, pcOnline, stream, prefs.callRemind());
+    }
+
+    private void joinMeeting(Meetings.Meeting m, boolean onPc) {
+        PcClient c = pc;
+        if (onPc && c != null && pcOnline) {
+            Toast.makeText(ctx, "Открываю «" + m.event.title + "» на ПК", Toast.LENGTH_SHORT).show();
+            io.execute(() -> {
+                try {
+                    c.open(m.url);
+                } catch (Exception e) {
+                    ui.post(() -> Toast.makeText(ctx, "ПК: " + SmartHome.msg(e), Toast.LENGTH_LONG).show());
+                }
+            });
+            return;
+        }
+        try {
+            ctx.startActivity(new Intent(Intent.ACTION_VIEW, Uri.parse(m.url)).addFlags(Intent.FLAG_ACTIVITY_NEW_TASK));
+        } catch (ActivityNotFoundException e) {
+            Toast.makeText(ctx, "Нет приложения для " + m.platform.name, Toast.LENGTH_SHORT).show();
+        }
+    }
+
+    private void callAction(PcClient.Call call, String action) {
+        PcClient c = pc;
+        if (c == null) return;
+        PcClient.Calls cur = pcCalls;
+        if (cur != null && (action.equals("mute") || action.equals("unmute"))) {
+            cur.micMuted = action.equals("mute");
+            callsSig = "";
+            renderCalls();
+        }
+        io.execute(() -> {
+            try {
+                String note = c.callAction(action, call == null ? "" : call.id);
+                ui.post(() -> {
+                    if (!note.isEmpty()) Toast.makeText(ctx, note, Toast.LENGTH_SHORT).show();
+                    ui.removeCallbacks(pcPoll);
+                    ui.postDelayed(pcPoll, 700);
+                });
+            } catch (Exception e) {
+                ui.post(() -> Toast.makeText(ctx, SmartHome.msg(e), Toast.LENGTH_SHORT).show());
+            }
+        });
+    }
+
+    // ---------------------------------------------------------------- day stats
+
+    private View buildStats() {
+        statsPanel = new StatsPanel(ctx, th, new StatsPanel.Listener() {
+            @Override
+            public void onDetails() {
+                openDayDetails();
+            }
+
+            @Override
+            public void onSetup() {
+                openSettings();
+            }
+        });
+        pcDayAt = 0;
+        return statsPanel;
+    }
+
+    private JSONObject phoneDay() {
+        JSONObject o = DayStats.today(ctx);
+        try {
+            o.put("music_sec", o.optInt("music_sec") + musicSec).put("tracks", o.optInt("tracks") + musicTracks);
+        } catch (Exception ignored) {
+            // numbers only
+        }
+        return o;
+    }
+
+    private void renderStats() {
+        if (statsPanel == null) return;
+        int n = 0;
+        for (CalEvent e : todayEvents) if (!e.allDay) n++;
+        statsPanel.render(pcOnline || pcDay != null ? pcDay : null, !prefs.pcHost().isEmpty(), phoneDay(),
+                Meetings.all(todayEvents), n);
+    }
+
+    /** The day in words: PC time, every call with its time and service, music. */
+    private void openDayDetails() {
+        LinearLayout m = menu("Сегодня");
+        JSONObject d = pcDay;
+        if (d != null) {
+            dayLine(m, "За компьютером", HomeDevice.minutes(d.optInt("active_min"))
+                    + (d.optString("first").isEmpty() ? "" : " · с " + d.optString("first") + " до " + d.optString("last")));
+            JSONArray calls = d.optJSONArray("calls");
+            if (calls != null && calls.length() > 0) {
+                dayLine(m, "Созвоны на ПК", HomeDevice.minutes(d.optInt("call_min")));
+                for (int i = 0; i < calls.length(); i++) {
+                    JSONObject c = calls.optJSONObject(i);
+                    String t = c.optString("title");
+                    dayLine(m, "   " + c.optString("start") + "–" + c.optString("end") + "  " + c.optString("name"),
+                            (t.isEmpty() ? "" : t + " · ") + HomeDevice.minutes(Math.max(1, c.optInt("min"))));
+                }
+            }
+            JSONArray apps = d.optJSONArray("apps");
+            for (int i = 0; apps != null && i < apps.length(); i++) {
+                JSONObject a = apps.optJSONObject(i);
+                dayLine(m, i == 0 ? "Приложения" : "", a.optString("name") + " · " + HomeDevice.minutes(a.optInt("min")));
+            }
+        } else {
+            dayLine(m, "Компьютер", prefs.pcHost().isEmpty() ? "не подключён" : "нет данных (нужна свежая версия DeskDash.exe)");
+        }
+        List<Meetings.Meeting> meet = Meetings.all(todayEvents);
+        if (!meet.isEmpty()) {
+            dayLine(m, "Созвоны в календаре", String.valueOf(meet.size()));
+            for (Meetings.Meeting x : meet) dayLine(m, "   " + fmt(x.event.start) + "  " + x.platform.name, x.event.title);
+        }
+        JSONObject ph = phoneDay();
+        if (ph.optInt("music_sec") > 0) {
+            dayLine(m, "Музыка", HomeDevice.minutes(ph.optInt("music_sec") / 60) + " · "
+                    + StatsPanel.plural(ph.optInt("tracks"), "трек", "трека", "треков"));
+        }
+        if (ph.optInt("home") > 0) dayLine(m, "Умный дом", StatsPanel.plural(ph.optInt("home"), "нажатие", "нажатия", "нажатий"));
+        openSheet(m);
+    }
+
+    private void dayLine(LinearLayout list, String label, String value) {
+        LinearLayout r = new LinearLayout(ctx);
+        TextView l = text(th.dim, 13);
+        l.setText(label);
+        r.addView(l, new LinearLayout.LayoutParams(0, -2, 1));
+        TextView v = text(th.text, 13);
+        v.setText(value);
+        v.setGravity(Gravity.END);
+        r.addView(v, new LinearLayout.LayoutParams(0, -2, 1.4f));
+        list.addView(r, margins(-1, -2, 0, 3, 0, 3));
+    }
+
+    private void countMusic() {
+        boolean playing;
+        String track;
+        if (media != null) {
+            PlaybackState st = media.getPlaybackState();
+            MediaMetadata md = media.getMetadata();
+            playing = st != null && st.getState() == PlaybackState.STATE_PLAYING;
+            track = md == null ? "" : String.valueOf(md.getString(MediaMetadata.METADATA_KEY_TITLE));
+        } else {
+            PcClient.SpState sp = spState;
+            playing = sp != null && sp.hasTrack && sp.playing;
+            track = sp == null ? "" : sp.title;
+        }
+        if (playing) {
+            musicSec++;
+            if (!track.equals(musicTrack)) {
+                musicTrack = track;
+                musicTracks++;
+            }
+        }
+        if (++musicTick >= 60) flushMusic();
+    }
+
+    private void flushMusic() {
+        musicTick = 0;
+        if (musicSec > 0) DayStats.add(ctx, "music_sec", musicSec);
+        if (musicTracks > 0) DayStats.add(ctx, "tracks", musicTracks);
+        musicSec = musicTracks = 0;
+    }
+
+    // ---------------------------------------------------------------- live strip
+
+    /** Pill at the top: a call on the PC, a call about to start, prints and washes running, alarms. */
+    private void buildLive() {
+        if (!prefs.live()) return;
+        live = new LinearLayout(ctx);
+        live.setGravity(Gravity.CENTER_VERTICAL);
+        live.setPadding(px(12), px(5), px(14), px(5));
+        live.setElevation(6 * dp);
+        live.setVisibility(GONE);
+        liveDot = new View(ctx);
+        live.addView(liveDot, margins(px(8), px(8), 0, 0, 8, 0));
+        liveText = text(th.text, 13);
+        liveText.setSingleLine();
+        liveText.setEllipsize(TextUtils.TruncateAt.END);
+        liveText.setMaxWidth(px(460));
+        live.addView(liveText);
+        live.setOnClickListener(v -> {
+            if (liveFlash != null) {
+                liveFlashUntil = 0;
+                renderLive();
+            } else if (liveAction != null) {
+                liveAction.run();
+            }
+        });
+        FrameLayout.LayoutParams lp = new FrameLayout.LayoutParams(-2, -2, Gravity.TOP | Gravity.CENTER_HORIZONTAL);
+        lp.topMargin = cutT + px(6);
+        addView(live, lp);
+    }
+
+    private void flashLive(String msg) {
+        liveFlash = msg;
+        liveFlashUntil = System.currentTimeMillis() + 60_000;
+        renderLive();
+    }
+
+    private void renderLive() {
+        if (live == null) return;
+        long now = System.currentTimeMillis();
+        String text = null;
+        int color = th.accent;
+        boolean pulse = false;
+        Runnable action = null;
+        if (liveFlash != null && now < liveFlashUntil) {
+            text = liveFlash;
+        } else {
+            liveFlash = null;
+        }
+        List<HomeDevice> busy = new ArrayList<>();
+        HomeDevice alarm = null;
+        for (HomeDevice d : home.devices().values()) {
+            if (d.alert && alarm == null) alarm = d;
+            if (d.busy()) busy.add(d);
+        }
+        PcClient.Calls calls = pcOnline ? pcCalls : null;
+        if (text == null && alarm != null) {
+            HomeDevice a = alarm;
+            text = a.name + ": " + a.status();
+            color = 0xFFE5534B;
+            pulse = true;
+            action = () -> openHomeSheet(a);
+        }
+        if (text == null && calls != null && !calls.calls.isEmpty()) {
+            PcClient.Call c = calls.calls.get(0);
+            text = c.name + " · " + CallPanel.clock((now - c.since) / 1000)
+                    + (calls.micMuted != null && calls.micMuted ? " · микрофон выкл" : "");
+            color = c.color;
+            pulse = true;
+            action = pcFeatures.contains("stream") ? () -> host.open(StreamActivity.class) : () -> callAction(c, "show");
+        }
+        if (text == null) {
+            for (Meetings.Meeting m : Meetings.upcoming(todayEvents, now)) {
+                long till = m.event.start - now;
+                if (till > prefs.callRemind() * 60_000L || now - m.event.start > 10 * 60_000L) continue;
+                text = m.event.title + " · " + CallPanel.countdown(m, now) + " · подключиться";
+                color = m.platform.color;
+                pulse = till <= 60_000;
+                action = () -> joinMeeting(m, pcOnline);
+                break;
+            }
+        }
+        if (text == null && !busy.isEmpty()) {
+            HomeDevice d = busy.get((int) (now / 6000 % busy.size()));
+            text = d.name + " · " + d.status() + (d.remainingMin > 0 ? " · до " + HomeDevice.finishAt(d.remainingMin) : "");
+            action = () -> openHomeSheet(d);
+        }
+        if (text == null) {
+            if (live.getVisibility() == VISIBLE) {
+                live.animate().alpha(0f).setDuration(200).withEndAction(() -> {
+                    live.setVisibility(GONE);
+                    applyPadding();
+                }).start();
+            }
+            return;
+        }
+        liveAction = action;
+        liveText.setText(text);
+        live.setBackground(rounded(DashTheme.blend(th.surface, color, 0.18f), 16));
+        GradientDrawable g = new GradientDrawable();
+        g.setShape(GradientDrawable.OVAL);
+        g.setColor(color | 0xFF000000);
+        liveDot.setBackground(g);
+        liveDot.setAlpha(pulse && now / 1000 % 2 == 0 ? 0.35f : 1f);
+        if (live.getVisibility() != VISIBLE) {
+            live.setAlpha(0f);
+            live.setVisibility(VISIBLE);
+            live.animate().alpha(1f).setDuration(200).start();
+            applyPadding();
+        }
     }
 
     // ---------------------------------------------------------------- sheet (detail cards and menus)
@@ -2011,6 +2448,11 @@ public class DashboardView extends FrameLayout {
 
     private void openMenu() {
         LinearLayout m = menu("DeskDash");
+        if (pcOnline && pcFeatures.contains("stream")) menuRow(m, "Экран ПК на телефоне", false, () -> {
+            closeSheet();
+            host.open(StreamActivity.class);
+        });
+        menuRow(m, "Статистика дня", false, this::openDayDetails);
         menuRow(m, "Столы и блоки…", false, () -> {
             closeSheet();
             host.open(DeskEditorActivity.class);
@@ -2064,7 +2506,8 @@ public class DashboardView extends FrameLayout {
     /** Pill at the bottom: profile name, one dot per desk, menu button. */
     private void buildBar(int di, boolean noOtherMenu) {
         List<Profiles.Profile> ps = Profiles.list(ctx);
-        if (deskCount < 2 && ps.size() < 2 && !noOtherMenu) return;
+        hasBar = !(deskCount < 2 && ps.size() < 2 && !noOtherMenu);
+        if (!hasBar) return;
         LinearLayout bar = new LinearLayout(ctx);
         bar.setGravity(Gravity.CENTER_VERTICAL);
         bar.setPadding(px(10), 0, px(2), 0);
@@ -2145,7 +2588,9 @@ public class DashboardView extends FrameLayout {
     private void applyPadding() {
         if (content == null) return;
         int base = px(22);
-        content.setPadding(base + cutL, px(16) + cutT, base + cutR, px(16) + cutB);
+        // the live strip takes the top edge: blocks move down instead of hiding under it
+        int top = live != null && live.getVisibility() == VISIBLE ? px(40) : px(16);
+        content.setPadding(base + cutL, top + cutT, base + cutR, (hasBar ? px(34) : px(16)) + cutB);
     }
 
     private int px(float v) {

@@ -231,10 +231,17 @@ final class YandexHome {
         else if (type.startsWith("devices.types.thermostat")) d.kind = HomeDevice.CLIMATE;
         else if (type.startsWith("devices.types.openable")) d.kind = HomeDevice.COVER;
         else if (type.startsWith("devices.types.media_device")) d.kind = HomeDevice.MEDIA;
+        else if (type.startsWith("devices.types.vacuum_cleaner")) d.kind = HomeDevice.VACUUM;
+        else if (type.startsWith("devices.types.washing_machine") || type.startsWith("devices.types.dishwasher")
+                || type.startsWith("devices.types.cooking")) d.kind = HomeDevice.APPLIANCE;
         else if (type.startsWith("devices.types.sensor") || !d.canToggle && readings.length() > 0) d.kind = HomeDevice.SENSOR;
         else d.kind = HomeDevice.SWITCH;
 
         if (d.kind == HomeDevice.MEDIA) d.state = d.on ? "Вкл" : "Выкл";
+        else if (d.kind == HomeDevice.VACUUM) {
+            d.state = d.on ? "Уборка" : "На базе";
+            d.detail = readings.toString();
+        } else if (d.kind == HomeDevice.APPLIANCE) d.state = d.on ? "Работает" : "Выкл";
         else if (d.kind != HomeDevice.CLIMATE) d.state = readings.toString();
         else if (Double.isNaN(d.target) && readings.length() > 0) d.state = readings.toString();
         return d;

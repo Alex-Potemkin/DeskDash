@@ -17,7 +17,11 @@ import uuid
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from urllib.parse import parse_qs, unquote, urlparse
 
+import calls
+import daystats
+import printers
 import spotify
+import stream
 
 if os.name == "nt":
     import sys_windows as sysapi
@@ -29,6 +33,9 @@ os.makedirs(DATA_DIR, exist_ok=True)
 CONFIG_PATH = os.path.join(DATA_DIR, "config.json")
 LOG_PATH = os.path.join(DATA_DIR, "agent.log")
 DISCOVERY_PORT = 8766
+DAYS = daystats.Days(os.path.join(DATA_DIR, "days.json"))
+JOIN_SCHEMES = ("https://", "http://", "zoommtg:", "zoomus:", "msteams:", "tg:", "discord:", "skype:")
+STREAMS = {}  # phone ip -> what it watches, shown in the GUI log
 
 LOG = collections.deque(maxlen=200)  # recent log lines, shown in the GUI
 CLIENTS = {}  # phone ip -> (last seen, token ok)
@@ -208,14 +215,98 @@ font:18px 'Segoe UI',sans-serif"><div style="text-align:center"><div style="font
         if path == "/api/info":
             return self._send(200, {"name": cfg["name"], "mac": cfg.get("mac") or default_mac(),
                                     "macros": [public_macro(m) for m in cfg["macros"]],
-                                    "spotify": spotify.status()["logged_in"]})
+                                    "spotify": spotify.status()["logged_in"],
+                                    "features": ["calls", "day", "bambu"] + (["stream"] if cfg.get("stream", True) else [])})
         if path == "/api/stats":
             return self._send(200, sysapi.stats())
         if path == "/api/spotify/devices":
             return self._spotify(lambda: {"devices": spotify.devices()})
         if path == "/api/spotify/state":
             return self._spotify(lambda: {"devices": spotify.devices(), "now": spotify.now_playing()})
+        query = parse_qs(urlparse(self.path).query)
+        if path == "/api/calls":
+            return self._send(200, {"ok": True, **calls.state()})
+        if path == "/api/day":
+            return self._send(200, {"ok": True, "name": cfg["name"], **DAYS.day(query.get("d", [""])[0] or None),
+                                    "week": DAYS.week()})
+        if path == "/api/stream/info":
+            return self._send(200, {"ok": True, **stream.info(cfg)})
+        if path in ("/api/stream/screen", "/api/stream/camera"):
+            return self._stream(cfg, path.rsplit("/", 1)[1], query)
+        if path == "/api/bambu":
+            return self._send(200, {"ok": True, "printers": printers.find()})
         self._send(404, {"ok": False, "error": "not found"})
+
+    def _stream(self, cfg, what, query):
+        """MJPEG: multipart/x-mixed-replace, one JPEG per part, until the phone hangs up.
+        ?once=1 answers a single JPEG (previews)."""
+        if not cfg.get("stream", True):
+            return self._send(403, {"ok": False, "error": "показ экрана выключен в DeskDash на ПК"})
+        if what == "screen" and not stream.screen_ok():
+            return self._send(503, {"ok": False, "error": "нет Pillow для снимков экрана"})
+        if what == "camera" and not stream.camera_backend():
+            return self._send(503, {"ok": False, "error": "для камеры нужен ffmpeg или opencv"})
+
+        def num(k, d, lo, hi):
+            try:
+                return max(lo, min(hi, int(query.get(k, [d])[0])))
+            except ValueError:
+                return d
+        width, quality, fps = num("w", 1280, 320, 2560), num("q", 60, 20, 90), num("fps", 8, 1, 20)
+        if query.get("once"):
+            try:
+                jpeg = stream.screen_frame(width, quality)
+            except Exception as e:
+                return self._send(503, {"ok": False, "error": str(e)})
+            self.send_response(200)
+            self.send_header("Content-Type", "image/jpeg")
+            self.send_header("Content-Length", str(len(jpeg)))
+            self.end_headers()
+            self.wfile.write(jpeg)
+            return
+        ip = self.client_address[0]
+        self.close_connection = True
+        self.send_response(200)
+        self.send_header("Content-Type", "multipart/x-mixed-replace; boundary=ddframe")
+        self.send_header("Cache-Control", "no-cache")
+        self.end_headers()
+        STREAMS[ip] = STREAMS.get(ip, 0) + 1
+        log(f"телефон {ip} смотрит {'экран' if what == 'screen' else 'камеру'}")
+        seq = 0
+        if what == "camera":
+            stream.CAMERA.start()
+        try:
+            while True:
+                t0 = time.monotonic()
+                if what == "screen":
+                    jpeg = stream.screen_frame(width, quality)
+                else:
+                    seq, jpeg = stream.CAMERA.wait(seq)
+                    if jpeg is None:
+                        continue
+                self.wfile.write(b"--ddframe\r\nContent-Type: image/jpeg\r\nContent-Length: "
+                                 + str(len(jpeg)).encode() + b"\r\n\r\n" + jpeg + b"\r\n")
+                self.wfile.flush()
+                if what == "screen":
+                    time.sleep(max(0.0, 1 / fps - (time.monotonic() - t0)))
+        except (OSError, ValueError):
+            pass  # the phone closed the view
+        except RuntimeError as e:
+            log(f"показ на телефоне: {e}")
+        finally:
+            if what == "camera":
+                stream.CAMERA.stop()
+            STREAMS[ip] = STREAMS.get(ip, 1) - 1
+            if STREAMS[ip] <= 0:
+                STREAMS.pop(ip, None)
+                log(f"телефон {ip} закрыл показ")
+
+    def _body(self):
+        try:
+            n = int(self.headers.get("Content-Length") or 0)
+            return json.loads(self.rfile.read(n) or b"{}") if n else {}
+        except ValueError:
+            return {}
 
     def do_POST(self):
         path = urlparse(self.path).path
@@ -228,6 +319,25 @@ font:18px 'Segoe UI',sans-serif"><div style="text-align:center"><div style="font
             device = unquote(path[len("/api/spotify/transfer/"):])
             log(f"Spotify: переключение устройства с {self.client_address[0]}")
             return self._spotify(lambda: spotify.transfer(device))
+        if path.startswith("/api/calls/"):
+            action = unquote(path[len("/api/calls/"):])
+            call_id = parse_qs(urlparse(self.path).query).get("call", [""])[0]
+            try:
+                note = calls.act(action, call_id)
+                log(f"созвон: {action} с {self.client_address[0]}")
+                return self._send(200, {"ok": True, "note": note, **calls.state()})
+            except Exception as e:
+                return self._send(200, {"ok": False, "error": str(e)})
+        if path == "/api/open":
+            url = str(self._body().get("url", "")).strip()
+            if not url.lower().startswith(JOIN_SCHEMES):
+                return self._send(400, {"ok": False, "error": "это не ссылка на созвон"})
+            try:
+                sysapi.open_target(url)
+                log(f"открыл ссылку с {self.client_address[0]}")
+                return self._send(200, {"ok": True})
+            except Exception as e:
+                return self._send(500, {"ok": False, "error": str(e)})
         if not path.startswith("/api/macro/"):
             return self._send(404, {"ok": False, "error": "not found"})
         mid = unquote(path[len("/api/macro/"):])
@@ -282,6 +392,7 @@ def start():
     cfg = config()
     server = ThreadingHTTPServer(("0.0.0.0", int(cfg["port"])), Handler)
     sysapi.start_background()
+    DAYS.start()
     threading.Thread(target=discovery, daemon=True).start()
     threading.Thread(target=server.serve_forever, daemon=True).start()
     log(f"агент запущен, порт {cfg['port']}")

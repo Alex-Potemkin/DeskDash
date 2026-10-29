@@ -61,6 +61,11 @@ final class Net {
     }
 
     static String request(String method, String url, String token, int timeoutMs) throws IOException {
+        return request(method, url, token, null, timeoutMs);
+    }
+
+    /** Request to the PC agent (X-Token header); json is the POST body or null. */
+    static String request(String method, String url, String token, String json, int timeoutMs) throws IOException {
         HttpURLConnection c = (HttpURLConnection) new URL(url).openConnection();
         try {
             c.setRequestMethod(method);
@@ -69,14 +74,17 @@ final class Net {
             c.setInstanceFollowRedirects(true);
             if (token != null) c.setRequestProperty("X-Token", token);
             if ("POST".equals(method)) {
+                byte[] data = json == null ? new byte[0] : json.getBytes(StandardCharsets.UTF_8);
                 c.setDoOutput(true);
-                c.setFixedLengthStreamingMode(0);
+                if (json != null) c.setRequestProperty("Content-Type", "application/json");
+                c.setFixedLengthStreamingMode(data.length);
                 try (OutputStream o = c.getOutputStream()) {
-                    o.flush();
+                    o.write(data);
                 }
             }
             int code = c.getResponseCode();
             if (code == 401) throw new IOException("неверный токен");
+            if (code == 404) throw new IOException("обнови DeskDash на ПК");
             if (code / 100 != 2) throw new IOException("HTTP " + code);
             try (InputStream in = c.getInputStream()) {
                 ByteArrayOutputStream b = new ByteArrayOutputStream();

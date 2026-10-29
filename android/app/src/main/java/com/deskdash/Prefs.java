@@ -89,6 +89,17 @@ public class Prefs {
     }
     public String hubToken() { return sp().getString("hub_token", "").trim(); }
 
+    /** Bambu Lab printers as JSON, see Bambu. */
+    public String bambu() { return sp().getString("bambu", "[]"); }
+    public void setBambu(String json) { sp().edit().putString("bambu", json).apply(); }
+
+    /** Strip at the top with running prints, washes, calls and alarms. */
+    public boolean live() { return sp().getBoolean("live", true); }
+    /** Calls: minutes before a meeting when the dashboard starts reminding. */
+    public int callRemind() { return sp().getInt("call_remind", 5); }
+    /** Where "Подключиться" opens a meeting: "pc" or "phone". */
+    public String callJoin() { return sp().getString("call_join", "pc"); }
+
     public String yaClientId() { return sp().getString("ya_client_id", "").trim(); }
     public String yaToken() { return sp().getString("ya_token", "").trim(); }
     public void setYaToken(String t) { sp().edit().putString("ya_token", t).apply(); }

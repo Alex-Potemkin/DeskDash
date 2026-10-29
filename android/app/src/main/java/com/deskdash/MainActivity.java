@@ -26,7 +26,10 @@ public class MainActivity extends Activity {
         }
         dash = new DashboardView(this, w, screen -> startActivity(new Intent(this, screen)));
         setContentView(dash);
-        if (!"ics".equals(new Prefs(this).calSource()) && !CalendarRepo.hasPermission(this)) {
+        if (Presets.needWelcome(this)) {
+            // the wizard asks for the calendar itself, together with everything else
+            startActivity(new Intent(this, WelcomeActivity.class));
+        } else if (!"ics".equals(new Prefs(this).calSource()) && !CalendarRepo.hasPermission(this)) {
             requestPermissions(new String[]{Manifest.permission.READ_CALENDAR}, 1);
         }
     }

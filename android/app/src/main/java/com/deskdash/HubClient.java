@@ -50,7 +50,7 @@ final class HubClient {
         return out;
     }
 
-    /** action: on, off, toggle, run, brightness, color_temp, color, temperature. */
+    /** action: on, off, toggle, run, brightness, color_temp, color, temperature; pause, resume, stop, light. */
     void act(HomeDevice d, String action, Object value) throws IOException, JSONException {
         JSONObject body = new JSONObject().put("action", action);
         if (value != null) body.put("value", value);
@@ -104,6 +104,18 @@ final class HubClient {
         d.tMin = o.optDouble("tMin", 16);
         d.tMax = o.optDouble("tMax", 30);
         d.tStep = o.optDouble("tStep", 0.5);
+        d.progress = o.optInt("progress", -1);
+        d.remainingMin = o.optInt("remainingMin", -1);
+        d.job = o.optString("job");
+        d.detail = o.optString("detail");
+        d.alert = o.optBoolean("alert");
+        JSONObject cmds = o.optJSONObject("cmds");
+        if (cmds != null) {
+            for (java.util.Iterator<String> it = cmds.keys(); it.hasNext(); ) {
+                String k = it.next();
+                d.cmds.put(k, cmds.optString(k));
+            }
+        }
         return d;
     }
 

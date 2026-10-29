@@ -35,7 +35,7 @@ public final class IcsParser {
     private IcsParser() {}
 
     private static final class Raw {
-        String uid = "", summary = "", location = "", rrule, duration;
+        String uid = "", summary = "", location = "", description = "", url = "", rrule, duration;
         boolean allDay, cancelled;
         ZonedDateTime start, end;
         final Set<Long> exdates = new HashSet<>();
@@ -89,6 +89,9 @@ public final class IcsParser {
                     case "UID": cur.uid = value.trim(); break;
                     case "SUMMARY": cur.summary = unescape(value); break;
                     case "LOCATION": cur.location = unescape(value); break;
+                    case "DESCRIPTION": cur.description = unescape(value); break;
+                    case "URL": cur.url = value.trim(); break;
+                    case "X-GOOGLE-CONFERENCE": cur.url = value.trim(); break;
                     case "STATUS": cur.cancelled = value.trim().equalsIgnoreCase("CANCELLED"); break;
                     case "DTSTART":
                         cur.allDay = isDate(value, params);
@@ -256,6 +259,8 @@ public final class IcsParser {
         CalEvent e = new CalEvent(r.summary, start, start + dur, r.allDay);
         e.location = r.location;
         e.calendar = cal;
+        e.description = r.description;
+        e.url = r.url;
         return e;
     }
 

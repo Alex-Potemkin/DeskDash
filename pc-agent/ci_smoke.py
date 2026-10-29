@@ -37,6 +37,17 @@ st = get("/api/stats", token)
 assert 0 <= st["ram"] <= 100 and "cpu" in st, st
 print("agent ok:", info["name"], st)
 
+# calls, day stats, screen for the phone
+assert "calls" in info["features"], info
+c = get("/api/calls", token)
+assert c["ok"] and c["calls"] == [], c
+agent.DAYS.tick()
+d = get("/api/day", token)
+assert d["ok"] and len(d["hours"]) == 24 and len(d["week"]) == 7, d
+s = get("/api/stream/info", token)
+assert s["ok"] and s["screen"], s
+print("calls/day/stream ok:", c["mic_muted"], d["active_min"], s)
+
 # a real key press through xdotool on the virtual display
 agent.sysapi.press("shift")
 agent.sysapi.press("ctrl+a", 2)

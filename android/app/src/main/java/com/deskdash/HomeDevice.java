@@ -1,14 +1,17 @@
 package com.deskdash;
 
+import java.util.HashMap;
 import java.util.Locale;
+import java.util.Map;
 
 /** One smart home thing shown as a tile: a Home Assistant entity, a Yandex device or a Yandex scenario. */
 final class HomeDevice {
-    static final int SWITCH = 0, LIGHT = 1, CLIMATE = 2, SENSOR = 3, SCENE = 4, COVER = 5, LOCK = 6, FAN = 7, MEDIA = 8;
+    static final int SWITCH = 0, LIGHT = 1, CLIMATE = 2, SENSOR = 3, SCENE = 4, COVER = 5, LOCK = 6, FAN = 7, MEDIA = 8,
+            PRINTER = 9, VACUUM = 10, CAMERA = 11, APPLIANCE = 12;
 
-    /** "ha:light.kitchen", "ya:<device id>" or "yas:<scenario id>". */
+    /** "ha:light.kitchen", "ya:<device id>", "yas:<scenario id>" or "bambu:<serial>". */
     String id = "";
-    /** "ha" or "ya". */
+    /** "ha", "ya" or "bambu". */
     String source = "";
     /** entity_id for Home Assistant, device/scenario id for Yandex. */
     String nativeId = "";
@@ -24,6 +27,21 @@ final class HomeDevice {
     /** Yandex colour model ("rgb" / "hsv"), empty when the lamp has no colour. */
     String colorModel = "";
     double current = Double.NaN, target = Double.NaN, tMin = 16, tMax = 30, tStep = 0.5;
+    /** Long jobs (3D print, washing): 0..100, -1 when there is no job. */
+    int progress = -1;
+    /** Minutes left of the job, -1 when unknown. */
+    int remainingMin = -1;
+    /** The job: file being printed, washing programme. */
+    String job = "";
+    /** More lines for the detail card: temperatures, layers, battery. */
+    String detail = "";
+    /** Picture for the tile and card: an http(s) URL, or "bambu:<serial>" for the printer's own camera. */
+    String image = "";
+    /** Something to look at now: leak, smoke, a failed print. */
+    boolean alert;
+    /** Extra buttons of the card ("pause", "resume", "stop", "light", "start", "dock") → the thing to call for it
+     *  (a Home Assistant entity, or the action itself). */
+    Map<String, String> cmds = new HashMap<>();
 
     HomeDevice copy() {
         HomeDevice d = new HomeDevice();
@@ -50,12 +68,24 @@ final class HomeDevice {
         d.tMin = tMin;
         d.tMax = tMax;
         d.tStep = tStep;
+        d.progress = progress;
+        d.remainingMin = remainingMin;
+        d.job = job;
+        d.detail = detail;
+        d.image = image;
+        d.alert = alert;
+        d.cmds = new HashMap<>(cmds);
         return d;
     }
 
     /** Whether the tile should look "lit". */
     boolean active() {
-        return available && kind != SENSOR && kind != SCENE && on;
+        return available && kind != SENSOR && kind != SCENE && kind != CAMERA && on;
+    }
+
+    /** A long job is running (print, wash, cleaning): shown in the live strip at the top. */
+    boolean busy() {
+        return available && on && (kind == PRINTER || kind == APPLIANCE || kind == VACUUM);
     }
 
     /** Second line of the tile. */
@@ -81,6 +111,16 @@ final class HomeDevice {
                 return on ? "Заперто" : "Открыто";
             case MEDIA:
                 return state.isEmpty() ? on ? "Играет" : "Пауза" : state;
+            case PRINTER:
+            case APPLIANCE: {
+                if (progress < 0 || !on) return state.isEmpty() ? "Ожидание" : state;
+                String s = progress + "%";
+                if (remainingMin >= 0) s += " · " + minutes(remainingMin);
+                return "Пауза".equals(state) ? "Пауза · " + s : s;
+            }
+            case VACUUM:
+            case CAMERA:
+                return state.isEmpty() ? "—" : state;
             default: {
                 String s = on ? "Вкл" : "Выкл";
                 return state.isEmpty() ? s : s + " · " + state;
@@ -94,8 +134,21 @@ final class HomeDevice {
             case COVER: return new String[]{"Открыть", "Закрыть"};
             case LOCK: return new String[]{"Запереть", "Отпереть"};
             case MEDIA: return new String[]{"Играть", "Пауза"};
+            case VACUUM: return new String[]{"Убрать", "На базу"};
             default: return new String[]{"Включить", "Выключить"};
         }
+    }
+
+    /** "1 ч 20 мин", "45 мин". */
+    static String minutes(int m) {
+        int h = m / 60, mm = m % 60;
+        if (h > 0 && mm > 0) return h + " ч " + mm + " мин";
+        return h > 0 ? h + " ч" : mm + " мин";
+    }
+
+    /** Clock time when a job that has m minutes left ends. */
+    static String finishAt(int m) {
+        return java.time.LocalTime.now().plusMinutes(m).format(java.time.format.DateTimeFormatter.ofPattern("H:mm"));
     }
 
     static String deg(double v) {

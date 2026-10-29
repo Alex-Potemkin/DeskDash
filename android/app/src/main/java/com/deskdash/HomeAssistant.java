@@ -77,10 +77,14 @@ final class HomeAssistant {
     List<HomeDevice> states() throws IOException, JSONException {
         JSONArray a = new JSONArray(get("/api/states"));
         List<HomeDevice> out = new ArrayList<>();
+        Map<String, JSONObject> byId = new HashMap<>();
         for (int i = 0; i < a.length(); i++) {
-            HomeDevice d = parse(a.getJSONObject(i));
+            JSONObject o = a.getJSONObject(i);
+            byId.put(o.optString("entity_id"), o);
+            HomeDevice d = parse(o, base);
             if (d != null) out.add(d);
         }
+        out.addAll(HaGadgets.build(byId, base));
         return out;
     }
 
@@ -134,6 +138,7 @@ final class HomeAssistant {
             case "cover": call(dom, on ? "open_cover" : "close_cover", target(d)); break;
             case "lock": call(dom, on ? "lock" : "unlock", target(d)); break;
             case "media_player": call(dom, on ? "media_play" : "media_pause", target(d)); break;
+            case "vacuum": call(dom, on ? "start" : "return_to_base", target(d)); break;
             default: call(dom, on ? "turn_on" : "turn_off", target(d)); break;
         }
     }
@@ -160,9 +165,22 @@ final class HomeAssistant {
         call("climate", "set_temperature", target(d).put("temperature", t));
     }
 
+    /** Card buttons of printers and vacuums: pause, resume, stop, light, start, dock. */
+    void command(HomeDevice d, String action) throws IOException, JSONException {
+        if (d.kind == HomeDevice.VACUUM) {
+            call("vacuum", "pause", target(d));
+            return;
+        }
+        String entity = d.cmds.get(action);
+        if (entity == null) throw new IOException("у устройства нет такой кнопки");
+        JSONObject t = new JSONObject().put("entity_id", entity);
+        if (entity.startsWith("light.")) call("light", "toggle", t);
+        else call("button", "press", t);
+    }
+
     // ---------------------------------------------------------------- parsing
 
-    static HomeDevice parse(JSONObject s) {
+    static HomeDevice parse(JSONObject s, String base) {
         String eid = s.optString("entity_id");
         int dot = eid.indexOf('.');
         if (dot < 0) return null;
@@ -252,10 +270,33 @@ final class HomeAssistant {
                 }
                 break;
             }
-            case "binary_sensor":
+            case "binary_sensor": {
                 d.kind = HomeDevice.SENSOR;
-                d.state = binary(a.optString("device_class", ""), d.on);
+                String cls = a.optString("device_class", "");
+                d.state = binary(cls, d.on);
+                d.alert = d.on && ("moisture".equals(cls) || "smoke".equals(cls) || "gas".equals(cls)
+                        || "carbon_monoxide".equals(cls) || "safety".equals(cls) || "problem".equals(cls));
                 break;
+            }
+            case "vacuum": {
+                d.kind = HomeDevice.VACUUM;
+                d.canToggle = true;
+                d.on = "cleaning".equals(st) || "returning".equals(st);
+                d.state = vacuum(st);
+                d.alert = "error".equals(st);
+                if (a.has("battery_level")) d.detail = "Батарея " + a.optInt("battery_level") + "%";
+                d.cmds.put("pause", "pause");
+                break;
+            }
+            case "camera":
+            case "image": {
+                d.kind = HomeDevice.CAMERA;
+                String pic = a.optString("entity_picture", "");
+                d.image = pic.isEmpty() || pic.startsWith("http") ? pic : base + pic;
+                d.state = "streaming".equals(st) || "recording".equals(st) || "idle".equals(st) || "image".equals(dom) ? "Камера" : "Выкл";
+                if ("image".equals(dom) && !eid.endsWith("_camera")) return null; // print covers and the like belong to their device
+                break;
+            }
             case "person":
                 d.kind = HomeDevice.SENSOR;
                 d.state = "home".equals(st) ? "Дома" : "not_home".equals(st) ? "Не дома" : st;
@@ -268,6 +309,18 @@ final class HomeAssistant {
                 return null;
         }
         return d;
+    }
+
+    private static String vacuum(String s) {
+        switch (s) {
+            case "cleaning": return "Уборка";
+            case "docked": return "На базе";
+            case "returning": return "Едет на базу";
+            case "paused": return "Пауза";
+            case "idle": return "Ждёт";
+            case "error": return "Ошибка";
+            default: return s;
+        }
     }
 
     private static String hvac(String s) {

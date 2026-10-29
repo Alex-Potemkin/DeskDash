@@ -32,7 +32,7 @@ final class SmartHome {
     }
 
     static boolean configured(Prefs p) {
-        return HubClient.configured(p) || HomeAssistant.configured(p) || YandexHome.configured(p);
+        return HubClient.configured(p) || HomeAssistant.configured(p) || YandexHome.configured(p) || Bambu.configured(p);
     }
 
     Map<String, HomeDevice> devices() {
@@ -100,6 +100,7 @@ final class SmartHome {
             if (ya != null) yaCache = ya;
             if (yaOn) for (HomeDevice d : yaCache) next.put(d.id, d);
             now = System.currentTimeMillis();
+            for (HomeDevice d : Bambu.devices()) next.put(d.id, d);
             for (Map.Entry<String, Long> h : new ArrayList<>(holds.entrySet())) {
                 if (now < h.getValue() && old.containsKey(h.getKey())) next.put(h.getKey(), old.get(h.getKey()));
                 else holds.remove(h.getKey());
@@ -115,11 +116,13 @@ final class SmartHome {
             hubError = null;
         } catch (Exception e) {
             hubError = msg(e);
-            return;
+            l = new ArrayList<>();
+            for (HomeDevice d : devices.values()) if (!"bambu".equals(d.source)) l.add(d);
         }
         synchronized (lock) {
             Map<String, HomeDevice> old = devices, next = new LinkedHashMap<>();
             for (HomeDevice d : l) next.put(d.id, d);
+            for (HomeDevice d : Bambu.devices()) next.put(d.id, d);
             long now = System.currentTimeMillis();
             for (Map.Entry<String, Long> h : new ArrayList<>(holds.entrySet())) {
                 if (now < h.getValue() && old.containsKey(h.getKey()) && next.containsKey(h.getKey())) next.put(h.getKey(), old.get(h.getKey()));
@@ -160,6 +163,19 @@ final class SmartHome {
             if (ha(d)) new HomeAssistant(prefs).setOn(d, on);
             else new YandexHome(prefs).setOn(d, on);
         });
+    }
+
+    /** Card buttons of printers, vacuums and appliances: pause, resume, stop, light. */
+    String command(HomeDevice d, String action) {
+        if ("bambu".equals(d.source)) {
+            return run(d, () -> {
+                Bambu.Printer p = Bambu.get(d.nativeId);
+                if (p == null) throw new java.io.IOException("принтер не настроен");
+                p.command(action);
+            });
+        }
+        if (HubClient.configured(prefs)) return run(d, () -> new HubClient(prefs).act(d, action, null));
+        return run(d, () -> new HomeAssistant(prefs).command(d, action));
     }
 
     String runScene(HomeDevice d) {
@@ -209,7 +225,7 @@ final class SmartHome {
     private String run(HomeDevice d, Call c) {
         try {
             c.run();
-            if (!ha(d)) yaAt = 0; // re-read Yandex on the next poll
+            if ("ya".equals(d.source)) yaAt = 0; // re-read Yandex on the next poll
             return null;
         } catch (Exception e) {
             release(d.id);
@@ -226,6 +242,11 @@ final class SmartHome {
     /** Everything both services offer, grouped by room; problems go into errors. Blocking. */
     static List<HomeDevice> listAll(Prefs p, StringBuilder errors) {
         List<HomeDevice> out = new ArrayList<>();
+        Bambu.sync(p);
+        for (Bambu.Config c : Bambu.load(p)) {
+            HomeDevice d = Bambu.get(c.serial) != null ? Bambu.get(c.serial).device() : null;
+            if (d != null) out.add(d);
+        }
         if (HubClient.configured(p)) {
             try {
                 List<HomeDevice> l = new HubClient(p).devices();

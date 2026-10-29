@@ -2,6 +2,8 @@ package com.deskdash;
 
 import android.content.Context;
 import android.content.res.ColorStateList;
+import android.graphics.Bitmap;
+import android.graphics.Outline;
 import android.graphics.Typeface;
 import android.graphics.drawable.GradientDrawable;
 import android.os.Handler;
@@ -9,6 +11,8 @@ import android.os.Looper;
 import android.util.TypedValue;
 import android.view.Gravity;
 import android.view.View;
+import android.view.ViewOutlineProvider;
+import android.widget.ImageView;
 import android.widget.LinearLayout;
 import android.widget.SeekBar;
 import android.widget.TextView;
@@ -27,6 +31,12 @@ final class HomeSheet {
         void color(int rgb);
 
         void temperature(double t);
+
+        /** Printer / vacuum buttons: pause, resume, stop, light. */
+        void command(String action);
+
+        /** Camera or printer picture, null while there is none. */
+        Bitmap image(HomeDevice d);
 
         /** Keeps the card open while the user is fiddling with it. */
         void touched();
@@ -58,14 +68,87 @@ final class HomeSheet {
         title.setTypeface(Typeface.create("sans-serif-medium", Typeface.NORMAL));
         card.addView(title);
         TextView sub = text(th.dim, 13);
-        String src = "ha".equals(d.source) ? "Home Assistant" : "Яндекс";
+        String src = "ha".equals(d.source) ? "Home Assistant" : "bambu".equals(d.source) ? "по локальной сети" : "Яндекс";
         sub.setText(d.room.isEmpty() ? src : d.room + " · " + src);
         card.addView(sub, lp(2, 10));
 
-        TextView status = text(th.accent, 26);
+        if (!d.image.isEmpty()) {
+            ImageView pic = new ImageView(ctx);
+            pic.setScaleType(ImageView.ScaleType.CENTER_CROP);
+            pic.setBackgroundColor(th.bg);
+            pic.setOutlineProvider(new ViewOutlineProvider() {
+                @Override
+                public void getOutline(View v, Outline o) {
+                    o.setRoundRect(0, 0, v.getWidth(), v.getHeight(), 14 * dp);
+                }
+            });
+            pic.setClipToOutline(true);
+            Handler h = new Handler(Looper.getMainLooper());
+            Runnable refresh = new Runnable() {
+                @Override
+                public void run() {
+                    if (!pic.isAttachedToWindow() && pic.getTag() != null) return;
+                    pic.setTag("shown");
+                    Bitmap b = a.image(d);
+                    if (b != null) pic.setImageBitmap(b);
+                    h.postDelayed(this, 1500);
+                }
+            };
+            refresh.run();
+            card.addView(pic, new LinearLayout.LayoutParams(-1, px(200)));
+            ((LinearLayout.LayoutParams) pic.getLayoutParams()).bottomMargin = px(12);
+        }
+
+        TextView status = text(d.alert ? 0xFFE5534B : th.accent, 26);
         status.setTypeface(Typeface.create("sans-serif-light", Typeface.NORMAL));
-        status.setText(d.kind == HomeDevice.CLIMATE && !d.state.isEmpty() ? d.status() + " · " + d.state : d.status());
-        card.addView(status, lp(0, 12));
+        status.setText(d.kind == HomeDevice.CLIMATE && !d.state.isEmpty() ? d.status() + " · " + d.state
+                : d.progress >= 0 && d.on ? d.progress + "%" + ("Пауза".equals(d.state) ? " · пауза" : "") : d.status());
+        card.addView(status, lp(0, d.progress >= 0 && d.on ? 6 : 12));
+
+        if (d.progress >= 0 && d.on) {
+            android.widget.ProgressBar pb = new android.widget.ProgressBar(ctx, null, android.R.attr.progressBarStyleHorizontal);
+            pb.setMax(100);
+            pb.setProgress(d.progress);
+            pb.setProgressTintList(ColorStateList.valueOf(th.accent));
+            pb.setProgressBackgroundTintList(ColorStateList.valueOf(th.line));
+            card.addView(pb, lp(0, 4));
+            if (d.remainingMin >= 0) {
+                TextView left = text(th.text, 15);
+                left.setText("Осталось " + HomeDevice.minutes(d.remainingMin) + " · готово в " + HomeDevice.finishAt(d.remainingMin));
+                card.addView(left, lp(2, 6));
+            }
+        }
+        if (!d.job.isEmpty()) {
+            TextView job = text(th.text, 14);
+            job.setText(d.job);
+            card.addView(job, lp(0, 4));
+        }
+        if (!d.detail.isEmpty()) {
+            TextView det = text(th.dim, 13);
+            det.setLineSpacing(0, 1.2f);
+            det.setText(d.detail);
+            card.addView(det, lp(0, 12));
+        }
+        if (!d.cmds.isEmpty() && d.available) {
+            LinearLayout row = row();
+            String[][] names = {{"resume", "Продолжить"}, {"pause", "Пауза"}, {"stop", "Остановить"}, {"light", "Подсветка"}};
+            for (String[] n : names) {
+                if (!d.cmds.containsKey(n[0])) continue;
+                TextView b = pill(n[1], false, null);
+                b.setOnClickListener(v -> {
+                    if ("stop".equals(n[0]) && v.getTag() == null) {
+                        v.setTag("armed");
+                        b.setText("Точно?");
+                        b.setTextColor(0xFFE5534B);
+                        a.touched();
+                        return;
+                    }
+                    a.command(n[0]);
+                });
+                row.addView(b, weight());
+            }
+            card.addView(row, lp(4, 12));
+        }
 
         if (d.kind == HomeDevice.SCENE) {
             card.addView(pill("Запустить", true, v -> a.run()), lp(0, 4));

@@ -68,7 +68,7 @@ public final class CalendarRepo {
         ContentUris.appendId(b, ws - DAY_MS);
         ContentUris.appendId(b, we + DAY_MS);
         String[] proj = {Instances.TITLE, Instances.BEGIN, Instances.END, Instances.ALL_DAY,
-                Instances.DISPLAY_COLOR, Instances.EVENT_LOCATION, Instances.CALENDAR_DISPLAY_NAME};
+                Instances.DISPLAY_COLOR, Instances.EVENT_LOCATION, Instances.CALENDAR_DISPLAY_NAME, Instances.DESCRIPTION};
         try (Cursor cur = c.getContentResolver().query(b.build(), proj, Instances.VISIBLE + "=1", null, Instances.BEGIN + " ASC")) {
             if (cur == null) return out;
             while (cur.moveToNext()) {
@@ -90,6 +90,7 @@ public final class CalendarRepo {
                 ev.color = cur.getInt(4);
                 ev.location = nz(cur.getString(5));
                 ev.calendar = nz(cur.getString(6));
+                ev.description = nz(cur.getString(7));
                 out.add(ev);
             }
         } catch (RuntimeException ignored) {

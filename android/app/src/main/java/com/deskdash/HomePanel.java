@@ -2,6 +2,10 @@ package com.deskdash;
 
 import android.content.Context;
 import android.content.res.ColorStateList;
+import android.graphics.Bitmap;
+import android.graphics.Canvas;
+import android.graphics.Outline;
+import android.graphics.Paint;
 import android.graphics.Typeface;
 import android.graphics.drawable.GradientDrawable;
 import android.text.TextUtils;
@@ -10,6 +14,8 @@ import android.view.Gravity;
 import android.view.HapticFeedbackConstants;
 import android.view.View;
 import android.view.ViewGroup;
+import android.view.ViewOutlineProvider;
+import android.widget.FrameLayout;
 import android.widget.ImageView;
 import android.widget.LinearLayout;
 import android.widget.ScrollView;
@@ -28,7 +34,12 @@ final class HomePanel extends LinearLayout {
         void onLong(HomeDevice d);
 
         void onSetup();
+
+        /** Camera / printer picture for a tile, null while there is none; may start loading it. */
+        Bitmap image(HomeDevice d);
     }
+
+    private static final int ALERT = 0xFFE5534B;
 
     private final DashTheme th;
     private final float dp;
@@ -122,17 +133,38 @@ final class HomePanel extends LinearLayout {
     // ---------------------------------------------------------------- tile
 
     private final class Tile {
-        final LinearLayout root;
-        final ImageView icon;
+        final FrameLayout root;
+        final LinearLayout box;
+        final ImageView icon, pic;
+        final View scrim;
         final TextView name, status;
+        final Progress bar;
         HomeDevice dev;
 
         Tile(Context c, String id, String savedName) {
-            root = new LinearLayout(c);
-            root.setOrientation(VERTICAL);
-            root.setPadding(px(12), px(10), px(10), px(8));
+            root = new FrameLayout(c);
+            root.setOutlineProvider(new ViewOutlineProvider() {
+                @Override
+                public void getOutline(View v, Outline o) {
+                    o.setRoundRect(0, 0, v.getWidth(), v.getHeight(), 16 * dp);
+                }
+            });
+            root.setClipToOutline(true);
+            pic = new ImageView(c);
+            pic.setScaleType(ImageView.ScaleType.CENTER_CROP);
+            pic.setVisibility(GONE);
+            root.addView(pic, new FrameLayout.LayoutParams(-1, -1));
+            scrim = new View(c);
+            scrim.setBackground(new android.graphics.drawable.GradientDrawable(
+                    android.graphics.drawable.GradientDrawable.Orientation.TOP_BOTTOM, new int[]{0x00000000, 0xB0000000}));
+            scrim.setVisibility(GONE);
+            root.addView(scrim, new FrameLayout.LayoutParams(-1, -1));
+            box = new LinearLayout(c);
+            box.setOrientation(VERTICAL);
+            box.setPadding(px(12), px(10), px(10), px(8));
+            root.addView(box, new FrameLayout.LayoutParams(-1, -1));
             icon = new ImageView(c);
-            root.addView(icon, new LayoutParams(px(22), px(22)));
+            box.addView(icon, new LayoutParams(px(22), px(22)));
             name = text(th.text, 13);
             name.setMaxLines(1);
             name.setEllipsize(TextUtils.TruncateAt.END);
@@ -140,12 +172,17 @@ final class HomePanel extends LinearLayout {
             LayoutParams nl = new LayoutParams(-1, 0, 1);
             nl.topMargin = px(4);
             name.setGravity(Gravity.BOTTOM);
-            root.addView(name, nl);
+            box.addView(name, nl);
             status = text(th.dim, 11);
             status.setSingleLine();
             status.setEllipsize(TextUtils.TruncateAt.END);
             status.setText("…");
-            root.addView(status, new LayoutParams(-1, -2));
+            box.addView(status, new LayoutParams(-1, -2));
+            bar = new Progress(c);
+            bar.setVisibility(GONE);
+            LayoutParams bl = new LayoutParams(-1, px(3));
+            bl.topMargin = px(4);
+            box.addView(bar, bl);
             root.setOnClickListener(v -> {
                 if (dev == null) return;
                 v.performHapticFeedback(HapticFeedbackConstants.VIRTUAL_KEY);
@@ -163,22 +200,59 @@ final class HomePanel extends LinearLayout {
         void bind(HomeDevice d) {
             dev = d;
             boolean lit = d != null && d.active();
-            int bg = lit ? DashTheme.blend(th.surface, th.accent, th.light ? 0.30f : 0.38f) : th.surface;
+            boolean alert = d != null && d.alert;
+            int bg = alert ? DashTheme.blend(th.surface, ALERT, 0.45f)
+                    : lit ? DashTheme.blend(th.surface, th.accent, th.light ? 0.30f : 0.38f) : th.surface;
             root.setBackground(rounded(bg, 16));
             root.setAlpha(d == null || !d.available ? 0.45f : 1f);
+            Bitmap img = d != null && !d.image.isEmpty() ? listener.image(d) : null;
+            boolean photo = img != null;
+            pic.setVisibility(photo ? VISIBLE : GONE);
+            scrim.setVisibility(photo ? VISIBLE : GONE);
+            if (photo) pic.setImageBitmap(img);
+            int fg = photo ? 0xFFFFFFFF : lit || alert ? DashTheme.onColor(bg) : th.text;
             icon.setImageResource(iconFor(d));
-            icon.setImageTintList(ColorStateList.valueOf(lit ? th.accent : th.dim));
-            if (lit && DashTheme.onColor(bg) != DashTheme.onColor(th.accent)) {
-                icon.setImageTintList(ColorStateList.valueOf(DashTheme.onColor(bg)));
-            }
+            int ic = photo ? 0xFFFFFFFF : alert ? DashTheme.onColor(bg) : lit ? th.accent : th.dim;
+            if (lit && !photo && DashTheme.onColor(bg) != DashTheme.onColor(th.accent)) ic = DashTheme.onColor(bg);
+            icon.setImageTintList(ColorStateList.valueOf(ic));
             if (d != null) {
                 name.setText(d.name);
                 status.setText(d.status());
             } else {
                 status.setText("…");
             }
-            name.setTextColor(lit ? DashTheme.onColor(bg) : th.text);
-            status.setTextColor(lit ? DashTheme.blend(DashTheme.onColor(bg), bg, 0.3f) : th.dim);
+            name.setTextColor(fg);
+            status.setTextColor(photo ? 0xD9FFFFFF : lit || alert ? DashTheme.blend(fg, bg, 0.3f) : th.dim);
+            boolean job = d != null && d.progress >= 0 && d.on;
+            bar.setVisibility(job ? VISIBLE : GONE);
+            if (job) bar.set(d.progress / 100f, photo ? 0x55FFFFFF : DashTheme.blend(bg, fg, 0.2f), photo ? 0xFFFFFFFF : th.accent);
+        }
+    }
+
+    /** Thin job progress line at the bottom of a tile. */
+    private static final class Progress extends View {
+        final Paint p = new Paint(Paint.ANTI_ALIAS_FLAG);
+        float frac;
+        int track, fg;
+
+        Progress(Context c) {
+            super(c);
+        }
+
+        void set(float f, int track, int fg) {
+            frac = f;
+            this.track = track;
+            this.fg = fg;
+            invalidate();
+        }
+
+        @Override
+        protected void onDraw(Canvas c) {
+            float r = getHeight() / 2f;
+            p.setColor(track);
+            c.drawRoundRect(0, 0, getWidth(), getHeight(), r, r, p);
+            p.setColor(fg);
+            c.drawRoundRect(0, 0, getWidth() * frac, getHeight(), r, r, p);
         }
     }
 
@@ -192,6 +266,10 @@ final class HomePanel extends LinearLayout {
             case HomeDevice.SCENE: return R.drawable.ic_star;
             case HomeDevice.FAN: return R.drawable.ic_fan;
             case HomeDevice.MEDIA: return R.drawable.ic_speaker;
+            case HomeDevice.PRINTER: return R.drawable.ic_printer;
+            case HomeDevice.VACUUM: return R.drawable.ic_vacuum;
+            case HomeDevice.CAMERA: return R.drawable.ic_camera;
+            case HomeDevice.APPLIANCE: return R.drawable.ic_washer;
             case HomeDevice.SENSOR: {
                 String s = d.state;
                 if (s.contains("Открыто") || s.contains("Закрыто")) return R.drawable.ic_door;
