@@ -5,3 +5,4 @@ linux/install.sh text eol=lf
 *.py text eol=lf
 *.yml text eol=lf
 hub/install.sh text eol=lf
+hub/nas_setup.sh text eol=lf
