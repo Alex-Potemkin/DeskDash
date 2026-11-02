@@ -78,6 +78,24 @@ final class HomeDevice {
         return d;
     }
 
+    private static final java.util.regex.Pattern DEG = java.util.regex.Pattern.compile("(-?\\d+(?:[.,]\\d+)?)\\s*°");
+    private static final java.util.regex.Pattern PCT = java.util.regex.Pattern.compile("(\\d+(?:[.,]\\d+)?)\\s*%");
+
+    /** Temperature a sensor or a thermostat reports, NaN when it reports none. */
+    double temperature() {
+        if (!Double.isNaN(current)) return current;
+        if (kind != SENSOR) return Double.NaN;
+        java.util.regex.Matcher m = DEG.matcher(state);
+        return m.find() ? Double.parseDouble(m.group(1).replace(',', '.')) : Double.NaN;
+    }
+
+    /** Humidity in %, -1 when the sensor has none. */
+    int humidity() {
+        if (kind != SENSOR || state.contains("батар")) return -1;
+        java.util.regex.Matcher m = PCT.matcher(state);
+        return m.find() ? (int) Math.round(Double.parseDouble(m.group(1).replace(',', '.'))) : -1;
+    }
+
     /** Whether the tile should look "lit". */
     boolean active() {
         return available && kind != SENSOR && kind != SCENE && kind != CAMERA && on;

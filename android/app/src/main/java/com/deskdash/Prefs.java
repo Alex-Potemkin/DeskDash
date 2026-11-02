@@ -78,6 +78,25 @@ public class Prefs {
     /** Room light (lux) below which the "light" trigger turns night on. */
     public int nightLux() { return sp().getInt("night_lux", 5); }
 
+    /** Smart home sensors (Yandex, Home Assistant, the hub) for the temperature outside and at home; empty = by name. */
+    public String weatherOut() { return sp().getString("weather_out", ""); }
+    public String weatherIn() { return sp().getString("weather_in", ""); }
+
+    /** Always-on screen after this many idle minutes, 0 = never. */
+    public int aodAfter() { return sp().getInt("aod_after", 10); }
+    /** AodClock.STYLES / AodClock.COLORS ids. */
+    public String aodClock() { return sp().getString("aod_clock", "stacked"); }
+    public String aodColor() { return sp().getString("aod_color", "aurora"); }
+    /** Falling rain and snow behind the always-on clock: "night", "always" or "off". */
+    public String aodFx() { return sp().getString("aod_fx", "night"); }
+    public boolean aodShows(String what) { return sp().getBoolean("aod_" + what, true); }
+    public int aodBright() { return Math.max(1, Math.min(40, sp().getInt("aod_bright", 6))); }
+
+    /** Own accent colour over the theme's, 0 = the theme's. */
+    public int accent() { return sp().getInt("accent", 0); }
+    /** Gradient behind the widgets: "none", "aurora", "sunset", "ocean", "graphite", "dawn", "sky". */
+    public String wallpaper() { return sp().getString("wallpaper", "none"); }
+
     /** Weather line under the clock, rain warning in the live strip. */
     public boolean weatherClock() { return sp().getBoolean("weather_clock", true); }
     public boolean weatherRain() { return sp().getBoolean("weather_rain", true); }

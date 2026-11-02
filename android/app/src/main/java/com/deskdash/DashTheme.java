@@ -76,6 +76,25 @@ public final class DashTheme {
                 blend(b.now, 0xFF000000, 0.4f), false, ev);
     }
 
+    /** The same palette with another accent (Settings → «Вид» → «Акцент»). */
+    public DashTheme withAccent(int color) {
+        if (color == 0 || isNight()) return this;
+        return new DashTheme(id, name, bg, surface, text, dim, line, color | 0xFF000000, now, light, events);
+    }
+
+    /** Wallpaper gradients behind the widgets, by id; null for none. */
+    public static int[] wallpaper(String id) {
+        switch (id == null ? "" : id) {
+            case "aurora": return new int[]{0xFF06141F, 0xFF0F3B45, 0xFF2A1748};
+            case "sunset": return new int[]{0xFF1A0F2E, 0xFF5B1E3C, 0xFFA8452E};
+            case "ocean": return new int[]{0xFF04101F, 0xFF0B2E57, 0xFF125E7A};
+            case "graphite": return new int[]{0xFF101012, 0xFF2A2A30, 0xFF15151A};
+            case "dawn": return new int[]{0xFFFDE4D0, 0xFFF3D9F2, 0xFFDCE4FF};
+            case "sky": return new int[]{0xFFD8EAFF, 0xFFEFF4FF, 0xFFE6F7F1};
+            default: return null;
+        }
+    }
+
     /** One step brighter surfaces, for things that sit on a card of the original surface colour (the "Плитки" look). */
     public DashTheme lifted() {
         return new DashTheme(id, name, bg, blend(surface, text, light ? 0.05f : 0.07f), text, dim,

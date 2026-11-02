@@ -53,6 +53,7 @@ public class SettingsActivity extends Activity {
             case "desks": return Ui.INDIGO;
             case "screen": return Ui.PURPLE;
             case "weather": return Ui.TEAL;
+            case "aod": return Ui.MINT;
             case "calendar": return Ui.RED;
             case "calls": return Ui.GREEN;
             case "music": return Ui.PINK;
@@ -65,13 +66,14 @@ public class SettingsActivity extends Activity {
 
     /** id, title, icon, words to search for. */
     private static final Object[][] PAGES = {
-            {"look", "Вид и часы", R.drawable.ic_palette, "вид интерфейс плитки фокус док лента колонки тема цвет часы стиль шрифт секунды 24 формат обложка акцент google цвета событий"},
+            {"look", "Вид и часы", R.drawable.ic_palette, "вид интерфейс виджеты standby док лента обои акцент тема цвет часы стиль шрифт секунды 24 формат обложка акцент google цвета событий"},
             {"desks", "Столы и готовые варианты", R.drawable.ic_dashboard, "столы блоки колонки варианты пресеты шаблоны рабочий умный дом минимализм"},
             {"screen", "Экран и ночь", R.drawable.ic_night, "ночь ночной режим закат рассвет датчик света темно часы будильник яркость выгорание заставка живая строка сверху"},
-            {"weather", "Погода", R.drawable.ic_weather, "погода город температура дождь снег прогноз ветер"},
+            {"aod", "Always On Display", R.drawable.ic_clock, "always on display aod простой часы дождь снег анимация яркость цвет градиент"},
+            {"weather", "Погода", R.drawable.ic_weather, "погода город температура дождь снег прогноз ветер датчик яндекс улица дома влажность"},
             {"calendar", "Календарь", R.drawable.ic_calendar, "календарь google ics ссылки события доступ"},
             {"calls", "Созвоны", R.drawable.ic_camera, "созвоны звонки zoom meet teams телемост discord telegram whatsapp телефон ссылка буфер напоминание звук подключиться экран вебка камера"},
-            {"music", "Музыка", R.drawable.ic_music, "музыка spotify уведомления плеер"},
+            {"music", "Музыка", R.drawable.ic_music, "музыка spotify уведомления плеер трансляция статуса разрешение"},
             {"stats", "Статистика дня", R.drawable.ic_chart, "статистика день время за компьютером приложения неделя"},
             {"pc", "Компьютер", R.drawable.ic_desktop, "компьютер пк ip токен макросы deskdash.exe найти разбудить wake"},
             {"home", "Умный дом", R.drawable.ic_home, "умный дом home assistant яндекс хаб raspberry pi свет устройства автоматизации рассвет созвон выключить всё"},
@@ -92,7 +94,7 @@ public class SettingsActivity extends Activity {
         sp = prefs.raw();
         dp = getResources().getDisplayMetrics().density;
         page = getIntent().getStringExtra(EXTRA_PAGE);
-        th = DashTheme.byId(prefs.theme());
+        th = DashTheme.byId(prefs.theme()).withAccent(prefs.accent());
         ACCENT = th.accent;
         TEXT = th.text;
         DIM = th.dim;
@@ -210,13 +212,16 @@ public class SettingsActivity extends Activity {
         }
         pageCard("desks", plural(desks.length(), "стол", "стола", "столов") + " · " + plural(blocks, "блок", "блока", "блоков"));
         pageCard("screen", nightSummary() + (prefs.live() ? " · живая строка" : ""));
+        pageCard("aod", prefs.aodAfter() == 0 ? "выключен" : "через " + prefs.aodAfter() + " мин · " + name(AodClock.STYLES, prefs.aodClock())
+                + " · " + name(AodClock.COLORS, prefs.aodColor()));
         section("Данные");
-        pageCard("weather", Weather.configured(prefs) ? Weather.place(prefs) : "город не выбран");
+        pageCard("weather", (Weather.configured(prefs) ? Weather.place(prefs) : "город не выбран")
+                + (prefs.weatherOut().isEmpty() ? "" : " · датчик " + sp.getString("weather_out_names", "")));
         String cal = prefs.calSource();
         pageCard("calendar", "ics".equals(cal) ? icsCount() : !CalendarRepo.hasPermission(this) ? "нет доступа — нажми, чтобы дать"
                 : "both".equals(cal) ? "аккаунт и " + icsCount() : "Google-аккаунт на телефоне");
         pageCard("calls", "напомнить за " + prefs.callRemind() + " мин · подключаться " + ("pc".equals(prefs.callJoin()) ? "на ПК" : "с телефона"));
-        pageCard("music", MusicWatcher.hasAccess(this) ? "доступ есть" : "нужен доступ к уведомлениям");
+        pageCard("music", MusicWatcher.hasAccess(this) ? "видно любой плеер" : "Spotify без разрешений · кнопки работают");
         pageCard("stats", prefs.pcHost().isEmpty() ? "музыка и умный дом; ПК не подключён" : "ПК, созвоны, музыка, умный дом");
         section("Подключения");
         pageCard("pc", prefs.pcHost().isEmpty() ? "не подключён" : prefs.pcHost() + (prefs.pcToken().isEmpty() ? " · нет токена" : ""));
@@ -392,6 +397,7 @@ public class SettingsActivity extends Activity {
             case "desks": desks(); break;
             case "screen": screen(); break;
             case "weather": weather(); break;
+            case "aod": aod(); break;
             case "calendar": calendar(); break;
             case "calls": calls(); break;
             case "music": music(); break;
@@ -457,6 +463,41 @@ public class SettingsActivity extends Activity {
         add(scroll(row), 4, 4);
         note("На столе: двойной тап по часам — следующая тема.");
 
+        section("Акцент");
+        int[][] accents = {{0, 0}, {Ui.BLUE, 1}, {Ui.INDIGO, 1}, {Ui.PURPLE, 1}, {Ui.PINK, 1}, {Ui.RED, 1}, {Ui.ORANGE, 1},
+                {Ui.YELLOW, 1}, {Ui.GREEN, 1}, {Ui.MINT, 1}, {Ui.TEAL, 1}, {Ui.BROWN, 1}};
+        LinearLayout acc = new LinearLayout(this);
+        int curAcc = prefs.accent();
+        for (int[] a : accents) {
+            int col = a[1] == 0 ? DashTheme.byId(prefs.theme()).accent : a[0];
+            acc.addView(swatch(new int[]{col}, a[0] == curAcc, a[1] == 0 ? "А" : "", v -> {
+                sp.edit().putInt("accent", a[0]).apply();
+                recreate();
+            }), chipLp());
+        }
+        add(scroll(acc), 4, 4);
+        note("Цвет кнопок, выделения и часов. «А» — как в теме.");
+
+        section("Обои");
+        String[][] walls = {{"none", "Нет"}, {"aurora", "Сияние"}, {"sunset", "Закат"}, {"ocean", "Океан"}, {"graphite", "Графит"},
+                {"dawn", "Рассвет"}, {"sky", "Небо"}};
+        LinearLayout wr = new LinearLayout(this);
+        for (String[] wl : walls) {
+            int[] g = DashTheme.wallpaper(wl[0]);
+            LinearLayout cell = new LinearLayout(this);
+            cell.setOrientation(LinearLayout.VERTICAL);
+            cell.setGravity(Gravity.CENTER_HORIZONTAL);
+            cell.addView(swatch(g == null ? new int[]{BG, BG} : g, wl[0].equals(prefs.wallpaper()), "", v -> {
+                sp.edit().putString("wallpaper", wl[0]).apply();
+                recreate();
+            }));
+            TextView n = text(wl[1], 12, DIM);
+            cell.addView(n, lpm(4, 0));
+            wr.addView(cell, chipLp());
+        }
+        add(scroll(wr), 4, 4);
+        note("Градиент за виджетами, как обои на iPhone. Ночью и на Always On Display — чёрный.");
+
         section("Часы");
         chips("clock_style", "digital", FancyClock.STYLES);
         note("Свайп по часам влево/вправо тоже меняет стиль.");
@@ -469,6 +510,82 @@ public class SettingsActivity extends Activity {
         section("Цвета");
         toggle("google_colors", "Цвета событий как в Google Календаре (выкл. — палитра темы)", true);
         toggle("art_accent", "Акцент из обложки трека", true);
+    }
+
+    /** A round colour sample (a gradient when there are several colours), ringed when chosen. */
+    private View swatch(int[] colors, boolean selected, String label, View.OnClickListener l) {
+        TextView v = text(label, 13, 0xFFFFFFFF);
+        v.setGravity(Gravity.CENTER);
+        v.setTypeface(Ui.font(700));
+        GradientDrawable g = colors.length > 1 ? new GradientDrawable(GradientDrawable.Orientation.TL_BR, colors) : new GradientDrawable();
+        if (colors.length == 1) g.setColor(colors[0]);
+        g.setShape(GradientDrawable.OVAL);
+        g.setStroke(px(selected ? 3 : 1), selected ? TEXT : LINE);
+        v.setBackground(g);
+        v.setLayoutParams(new LinearLayout.LayoutParams(px(40), px(40)));
+        v.setMinWidth(px(40));
+        v.setMinHeight(px(40));
+        v.setOnClickListener(l);
+        return v;
+    }
+
+    private static String name(String[][] options, String id) {
+        for (String[] o : options) if (o[0].equals(id)) return o[1];
+        return options[0][1];
+    }
+
+    // ---------------------------------------------------------------- always on display
+
+    private void aod() {
+        section("Как выглядит");
+        FrameLayout pv = new FrameLayout(this);
+        pv.setBackground(round(0xFF000000, 16));
+        pv.setClipToOutline(true);
+        WeatherFx fx = new WeatherFx(this);
+        Weather w = Weather.cached(prefs);
+        int group = w != null && Weather.wet(w.code) ? Weather.group(w.code) : Weather.RAIN;
+        fx.set(group, true, 0xFFFFFFFF);
+        pv.addView(fx, new FrameLayout.LayoutParams(-1, -1));
+        AodClock clk = new AodClock(this);
+        clk.setup(prefs.aodClock(), AodClock.palette(prefs.aodColor(), th), prefs.h24());
+        pv.addView(clk, new FrameLayout.LayoutParams(-1, -1));
+        pv.setMinimumHeight(px(170));
+        add(pv, 0, 0);
+        label("Часы");
+        chips("aod_clock", "stacked", AodClock.STYLES, true);
+        label("Цвет");
+        chips("aod_color", "aurora", AodClock.COLORS, true);
+        note("Ночью (Экран и ночь → «Только часы») этот же экран, в ночном цвете.");
+
+        section("Когда включать");
+        intChips("aod_after", prefs.aodAfter(), new int[]{2, 5, 10, 20, 30, 0}, "через %d мин", "Никогда");
+        note("Когда дашборд никто не трогал столько времени. Касание возвращает стол, звонок будит его сам.");
+
+        section("Погода на экране");
+        chips("aod_fx", "night", new String[][]{{"night", "Ночью"}, {"always", "Всегда"}, {"off", "Выкл"}});
+        note("Как у Samsung: дождь капает, снег падает, гроза вспыхивает, ясной ночью мерцают звёзды — по прогнозу для твоего города.");
+
+        section("Что показывать");
+        toggle("aod_battery", "Заряд батареи", true);
+        toggle("aod_weather", "Погода", true);
+        toggle("aod_events", "Ближайшее событие", true);
+        toggle("aod_music", "Что играет", true);
+
+        section("Яркость");
+        intChips("aod_bright", prefs.aodBright(), new int[]{2, 4, 6, 10, 20}, "%d %%", null);
+    }
+
+    /** One-of choice of numbers; zeroLabel names the value 0. */
+    private void intChips(String key, int cur, int[] values, String fmt, String zeroLabel) {
+        LinearLayout row = new LinearLayout(this);
+        for (int v0 : values) {
+            String label = v0 == 0 && zeroLabel != null ? zeroLabel : String.format(Locale.ROOT, fmt, v0);
+            row.addView(chip(label, v0 == cur, v -> {
+                sp.edit().putInt(key, v0).apply();
+                recreate();
+            }), chipLp());
+        }
+        add(scroll(row), 4, 4);
     }
 
     static String lookAbout(String id) {
@@ -619,6 +736,17 @@ public class SettingsActivity extends Activity {
         button("Найти город по названию", v -> searchCity(this, prefs, this::recreate));
         note("Прогноз Open-Meteo: бесплатно, без ключей и регистрации. Город по сети определяется по адресу подключения, "
                 + "без доступа к геолокации.");
+        section("Датчики умного дома");
+        if (SmartHome.configured(prefs)) {
+            autoRow("На улице", "weather_out", false, d -> !Double.isNaN(d.temperature()));
+            autoRow("Дома", "weather_in", false, d -> !Double.isNaN(d.temperature()));
+            note("Яндекс, Home Assistant или хаб: температура с датчика на улице заменяет «сейчас» из прогноза, а «дома» — "
+                    + "температура и влажность в комнате. Без выбора датчик на улице находится по имени («Улица», «Балкон»), "
+                    + "дома — средняя по датчикам и термостатам.");
+        } else {
+            note("Подключи Яндекс или Home Assistant в разделе «Умный дом», чтобы брать температуру с датчиков на улице и дома.");
+        }
+
         section("На экране");
         toggle("weather_clock", "Строка погоды под часами", true);
         toggle("weather_rain", "Предупреждать о дожде и снеге в живой строке", true);
@@ -675,7 +803,7 @@ public class SettingsActivity extends Activity {
         section("Без компьютера и календаря");
         toggle("phone_calls", "Звонки на этом телефоне: Telegram, WhatsApp, Zoom, Meet, обычные", true);
         if (!MusicWatcher.hasAccess(this)) {
-            primary("Дать доступ к уведомлениям", v -> open(new Intent(Settings.ACTION_NOTIFICATION_LISTENER_SETTINGS)));
+            primary("Дать доступ к уведомлениям", v -> open(MusicWatcher.accessIntent(this)));
         }
         note("Звонок на телефоне виден по уведомлению приложения: кто, сколько идёт, кнопки микрофона, громкой связи, "
                 + "«Завершить» и «Ответить». Нужен доступ к уведомлениям (тот же, что для музыки).");
@@ -709,10 +837,24 @@ public class SettingsActivity extends Activity {
     }
 
     private void music() {
-        section("Музыка");
-        if (MusicWatcher.hasAccess(this)) note("Доступ к уведомлениям есть: видно, что играет.");
-        else primary("Дать доступ к уведомлениям", v -> open(new Intent(Settings.ACTION_NOTIFICATION_LISTENER_SETTINGS)));
-        note("Включи DeskDash в списке, тогда будет видно, что играет в Spotify. Выбор устройства (кнопка рядом с плеером) появится, когда войдёшь в Spotify во вкладке Spotify в DeskDash.exe на ПК.");
+        section("Spotify без разрешений");
+        button("Открыть Spotify", v -> {
+            Intent i = getPackageManager().getLaunchIntentForPackage("com.spotify.music");
+            if (i == null) Toast.makeText(this, "Spotify не установлен", Toast.LENGTH_SHORT).show();
+            else open(i);
+        });
+        note("Spotify сам сообщает, что играет: в Spotify → Настройки → «Трансляция статуса устройства» (Device Broadcast "
+                + "Status). Трек, обложка и время появятся на дашборде, без доступа к уведомлениям. Кнопки ⏮ ⏯ ⏭ работают всегда.");
+
+        section("Любой плеер");
+        if (MusicWatcher.hasAccess(this)) note("Доступ есть: видно, что играет в любом приложении.");
+        else primary("Разрешить одним переключателем", v -> open(MusicWatcher.accessIntent(this)));
+        note("Откроется сразу переключатель DeskDash: включи его и вернись назад. Нужно для YouTube Music, Яндекс Музыки "
+                + "и других плееров, а также для звонков на телефоне.");
+
+        section("Spotify на других устройствах");
+        note("Выбор устройства (кнопка рядом с плеером) и трек с колонки или ПК появятся, когда войдёшь в Spotify "
+                + "во вкладке Spotify в DeskDash.exe на ПК.");
     }
 
     private void stats() {

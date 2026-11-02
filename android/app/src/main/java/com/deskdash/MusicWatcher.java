@@ -59,6 +59,19 @@ public class MusicWatcher {
         msm = ctx.getSystemService(MediaSessionManager.class);
     }
 
+    /**
+     * The screen with exactly DeskDash's notification-access switch (Android 11+), so giving access is one
+     * flip and "back"; older Android opens the list.
+     */
+    public static android.content.Intent accessIntent(Context c) {
+        if (android.os.Build.VERSION.SDK_INT >= 30) {
+            return new android.content.Intent(Settings.ACTION_NOTIFICATION_LISTENER_DETAIL_SETTINGS)
+                    .putExtra(Settings.EXTRA_NOTIFICATION_LISTENER_COMPONENT_NAME,
+                            new ComponentName(c, MediaListenerService.class).flattenToString());
+        }
+        return new android.content.Intent(Settings.ACTION_NOTIFICATION_LISTENER_SETTINGS);
+    }
+
     public static boolean hasAccess(Context c) {
         String s = Settings.Secure.getString(c.getContentResolver(), "enabled_notification_listeners");
         return s != null && s.contains(c.getPackageName());

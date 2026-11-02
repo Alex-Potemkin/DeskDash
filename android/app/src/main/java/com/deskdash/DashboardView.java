@@ -7,6 +7,8 @@ import android.content.ClipDescription;
 import android.content.ClipboardManager;
 import android.content.Context;
 import android.content.Intent;
+import android.content.IntentFilter;
+import android.os.BatteryManager;
 import android.content.res.ColorStateList;
 import android.content.res.Configuration;
 import android.database.ContentObserver;
@@ -231,6 +233,17 @@ public class DashboardView extends FrameLayout {
     private List<CalEvent> ribbonEvents = new ArrayList<>();
     private LinearLayout focusPills;
     private FrameLayout stack;
+
+    // the always-on screen: after a while without touches, and at night instead of the night clock
+    private boolean aod, swallow;
+    private long lastTouch = SystemClock.elapsedRealtime();
+    private AodClock aodClock;
+    private LinearLayout aodInfo;
+
+    // Spotify announcing itself without any permission
+    private final SpotifyBroadcast spotify = new SpotifyBroadcast();
+    private String sensorSig = "";
+    private static final java.util.regex.Pattern OUTSIDE = java.util.regex.Pattern.compile("улиц|снаруж|балкон|двор|outdoor|outside|street|погод");
     private String nightText = "";
 
     // night by the room light
@@ -308,6 +321,10 @@ public class DashboardView extends FrameLayout {
         pcOnline = false;
         Bambu.sync(prefs);
         music.start();
+        spotify.start(ctx, t -> {
+            renderMusic();
+            renderAodInfo();
+        });
         lastMinute = -1;
         ui.post(secondTick);
         ui.post(pcPoll);
@@ -337,6 +354,7 @@ public class DashboardView extends FrameLayout {
         flushMusic();
         Bambu.stopAll();
         music.stop();
+        spotify.stop();
         try {
             ctx.getContentResolver().unregisterContentObserver(calObserver);
         } catch (RuntimeException ignored) {
@@ -362,9 +380,11 @@ public class DashboardView extends FrameLayout {
         sheet = null;
         forgetBlockViews();
         nightActive = isNight();
-        DashTheme base = DashTheme.byId(prefs.theme());
+        DashTheme base = DashTheme.byId(prefs.theme()).withAccent(prefs.accent());
         th = !nightActive ? base : "dim".equals(prefs.nightLook()) ? base.dimmed() : DashTheme.night(prefs.nightTint());
-        setBackgroundColor(th.bg);
+        int[] wall = nightActive ? null : DashTheme.wallpaper(prefs.wallpaper());
+        if (wall != null) setBackground(new GradientDrawable(GradientDrawable.Orientation.TL_BR, wall));
+        else setBackgroundColor(th.bg);
         renderedDay = null;
         hasBar = false;
         bigClock = false;
@@ -375,6 +395,8 @@ public class DashboardView extends FrameLayout {
             if ("standby".equals(look)) look = "bento";
         } else if (nightClock) {
             look = "night";
+        } else if (aod) {
+            look = "aod";
         }
         deskSwipe = "bento".equals(look);
 
@@ -394,7 +416,8 @@ public class DashboardView extends FrameLayout {
         Set<String> used = new HashSet<>();
         switch (look) {
             case "night":
-                buildNight();
+            case "aod":
+                buildAod();
                 break;
             case "standby":
                 buildStandby(desks);
@@ -434,7 +457,8 @@ public class DashboardView extends FrameLayout {
 
     /** Columns of blocks of one desk; "bento" puts every block on its own card. */
     private void buildDesk(LinearLayout into, JSONObject desk, boolean portrait, Set<String> used, boolean bento) {
-        int card = th.surface;
+        // on a wallpaper the widgets let a little of it through
+        int card = DashTheme.wallpaper(prefs.wallpaper()) != null && !nightActive ? (th.surface & 0x00FFFFFF) | 0xE8000000 : th.surface;
         if (bento) th = th.lifted();
         JSONArray cols = desk.optJSONArray("cols");
         int ncols = cols == null ? 0 : cols.length();
@@ -511,6 +535,8 @@ public class DashboardView extends FrameLayout {
         ribbon = null;
         focusPills = null;
         stack = null;
+        aodClock = null;
+        aodInfo = null;
     }
 
     private View buildBlock(String type, JSONObject b) {
@@ -838,6 +864,12 @@ public class DashboardView extends FrameLayout {
                 peeking = false;
                 build();
             }
+            if (!aod && !"night".equals(look) && prefs.aodAfter() > 0 && sheet == null && picker == null && !inCall()
+                    && SystemClock.elapsedRealtime() - lastTouch > prefs.aodAfter() * 60_000L) {
+                aod = true;
+                peeking = false;
+                build();
+            }
             renderLive();
             LocalTime t = LocalTime.now();
             int m = t.getHour() * 60 + t.getMinute();
@@ -874,16 +906,22 @@ public class DashboardView extends FrameLayout {
             reloadCalendar();
         }
         if (prefs.burnIn() && content != null) {
-            // the night clock stays on for hours at the same place: it wanders further
-            float k = "night".equals(look) ? 8 : 1;
-            content.animate().translationX((rnd.nextFloat() * 10 - 5) * dp * k).translationY((rnd.nextFloat() * 8 - 4) * dp * k).setDuration(2000).start();
+            if ("night".equals(look) || "aod".equals(look)) {
+                // the always-on clock stays for hours: it wanders over a good part of the screen
+                content.animate().translationX((rnd.nextFloat() * 2 - 1) * getWidth() * 0.18f)
+                        .translationY((rnd.nextFloat() * 2 - 1) * getHeight() * 0.12f).setDuration(3000).start();
+            } else {
+                content.animate().translationX((rnd.nextFloat() * 10 - 5) * dp).translationY((rnd.nextFloat() * 8 - 4) * dp).setDuration(2000).start();
+            }
         }
+        renderAodInfo();
         if (idle && !monthMode && shownDay.equals(now)) scrollToNow(true);
         renderStats();
     }
 
     private void tickClock() {
         LocalDateTime now = LocalDateTime.now();
+        if (aodClock != null) aodClock.tick();
         if (dockTime != null) dockTime.setText(now.format(DateTimeFormatter.ofPattern(prefs.h24() ? "H:mm" : "h:mm")));
         if (dateText == null) return;
         if (clock != null) {
@@ -1021,6 +1059,10 @@ public class DashboardView extends FrameLayout {
     /** Night brightness at night; over the half hour before it the screen slides there from the day brightness. */
     private void applyNightWindow() {
         float b = prefs.brightness(), night = prefs.nightBright() / 100f;
+        if ("aod".equals(look) && !nightActive) {
+            setWindowBrightness(prefs.aodBright() / 100f);
+            return;
+        }
         if (nightActive) {
             setWindowBrightness(night);
             return;
@@ -1061,7 +1103,7 @@ public class DashboardView extends FrameLayout {
 
     /** Under the night clock: the next alarm and the weather for the morning. */
     private void updateNightText() {
-        if (!"night".equals(look)) return;
+        if (!"night".equals(look) && !"aod".equals(look)) return;
         StringBuilder sb = new StringBuilder();
         AlarmManager am = ctx.getSystemService(AlarmManager.class);
         AlarmManager.AlarmClockInfo a = am == null ? null : am.getNextAlarmClock();
@@ -1074,6 +1116,7 @@ public class DashboardView extends FrameLayout {
         }
         nightText = sb.toString();
         if (hint != null) hint.setText(nightText);
+        renderAodInfo();
     }
 
     /** Tap on the focus or night clock: the desks for a while, then back to the clock. */
@@ -1517,12 +1560,14 @@ public class DashboardView extends FrameLayout {
         MediaMetadata md = media == null ? null : media.getMetadata();
         PcClient.SpState sp = spState;
         boolean remote = md == null && sp != null && sp.hasTrack;
+        SpotifyBroadcast.Track sb = SpotifyBroadcast.last;
+        boolean bcast = md == null && !remote && sb != null && !sb.title.isEmpty();
         renderDeviceButton();
 
-        if (musicNoAccess && !remote || md == null && !remote) {
+        if (md == null && !remote && !bcast) {
             showArt(null);
             mTitle.setText(musicNoAccess ? "Музыка" : "Тишина");
-            mArtist.setText(musicNoAccess ? "Нажми, чтобы дать доступ к уведомлениям" : "Нажми ▶ или открой Spotify");
+            mArtist.setText(musicNoAccess ? "▶ играет и так · нажми, чтобы видеть трек" : "Нажми ▶ или открой Spotify");
             mTime.setText(deviceSuffix(false));
             mBar.set(0, th.line, th.accent);
             musicCard.setBackground(rounded(th.surface, 18));
@@ -1533,7 +1578,12 @@ public class DashboardView extends FrameLayout {
         String title, artist;
         Bitmap bmp = null;
         boolean playing;
-        if (remote) {
+        if (bcast) {
+            title = sb.title;
+            artist = sb.artist;
+            bmp = sb.art;
+            playing = sb.playing;
+        } else if (remote) {
             title = sp.title;
             artist = sp.artist;
             if (!sp.image.isEmpty()) bmp = artFromUri(sp.image);
@@ -1678,7 +1728,15 @@ public class DashboardView extends FrameLayout {
     }
 
     private void updateProgress() {
-        if (mBar == null || media == null) return;
+        if (mBar == null) return;
+        SpotifyBroadcast.Track sb = SpotifyBroadcast.last;
+        if (media == null && sb != null && sb.length > 0 && !(spState != null && spState.hasTrack)) {
+            long pos = Math.max(0, Math.min(SpotifyBroadcast.position(sb), sb.length));
+            mBar.set(pos / (float) sb.length, mBar.track, mBar.fg);
+            mTime.setText(mmss(pos) + " / " + mmss(sb.length));
+            return;
+        }
+        if (media == null) return;
         MediaMetadata md = media.getMetadata();
         if (md == null) return;
         long dur = md.getLong(MediaMetadata.METADATA_KEY_DURATION);
@@ -1714,10 +1772,17 @@ public class DashboardView extends FrameLayout {
             return;
         }
         if (media == null) {
-            if (dir == 0) {
-                // No active session: a media key resumes the last player (usually Spotify).
-                audio.dispatchMediaKeyEvent(new KeyEvent(KeyEvent.ACTION_DOWN, KeyEvent.KEYCODE_MEDIA_PLAY));
-                audio.dispatchMediaKeyEvent(new KeyEvent(KeyEvent.ACTION_UP, KeyEvent.KEYCODE_MEDIA_PLAY));
+            // no notification access, or nothing playing: media keys need no permission and reach the player
+            SpotifyBroadcast.Track sb = SpotifyBroadcast.last;
+            int key = dir < 0 ? KeyEvent.KEYCODE_MEDIA_PREVIOUS : dir > 0 ? KeyEvent.KEYCODE_MEDIA_NEXT
+                    : sb != null && sb.playing ? KeyEvent.KEYCODE_MEDIA_PAUSE : KeyEvent.KEYCODE_MEDIA_PLAY;
+            audio.dispatchMediaKeyEvent(new KeyEvent(KeyEvent.ACTION_DOWN, key));
+            audio.dispatchMediaKeyEvent(new KeyEvent(KeyEvent.ACTION_UP, key));
+            if (dir == 0 && sb != null) {
+                sb.position = SpotifyBroadcast.position(sb);
+                sb.at = System.currentTimeMillis();
+                sb.playing = !sb.playing;
+                renderMusic();
             }
             return;
         }
@@ -1733,8 +1798,9 @@ public class DashboardView extends FrameLayout {
 
     private void openMusicApp() {
         Intent i;
-        if (musicNoAccess) {
-            i = new Intent(Settings.ACTION_NOTIFICATION_LISTENER_SETTINGS);
+        if (musicNoAccess && SpotifyBroadcast.last == null) {
+            openMusicHelp();
+            return;
         } else {
             String pkg = media != null ? media.getPackageName() : SPOTIFY;
             i = ctx.getPackageManager().getLaunchIntentForPackage(pkg);
@@ -1749,6 +1815,36 @@ public class DashboardView extends FrameLayout {
         } catch (ActivityNotFoundException ignored) {
             // nothing to open
         }
+    }
+
+    /** Two ways to see the track: Spotify's own switch (no permission at all) or one switch for DeskDash. */
+    private void openMusicHelp() {
+        LinearLayout m = menu("Что играет");
+        m.addView(caption("БЕЗ РАЗРЕШЕНИЙ"));
+        menuRow(m, "Spotify → Настройки → «Трансляция статуса устройства»", false, () -> {
+            closeSheet();
+            Intent i = ctx.getPackageManager().getLaunchIntentForPackage(SPOTIFY);
+            if (i == null) {
+                Toast.makeText(ctx, "Spotify не установлен", Toast.LENGTH_SHORT).show();
+                return;
+            }
+            Toast.makeText(ctx, "В Spotify: Настройки → «Трансляция статуса устройства»", Toast.LENGTH_LONG).show();
+            ctx.startActivity(i.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK));
+        });
+        m.addView(caption("ЛЮБОЙ ПЛЕЕР"));
+        menuRow(m, "Один переключатель: DeskDash видит плеер", false, () -> {
+            closeSheet();
+            try {
+                ctx.startActivity(MusicWatcher.accessIntent(ctx).addFlags(Intent.FLAG_ACTIVITY_NEW_TASK));
+            } catch (ActivityNotFoundException e) {
+                Toast.makeText(ctx, "Экран недоступен на этой прошивке", Toast.LENGTH_SHORT).show();
+            }
+        });
+        TextView n = text(th.dim, 13);
+        n.setText("Кнопки ⏮ ⏯ ⏭ работают и без этого.");
+        n.setPadding(px(16), 0, px(16), 0);
+        m.addView(n);
+        openSheet(m);
     }
 
     private static String mmss(long ms) {
@@ -2251,6 +2347,10 @@ public class DashboardView extends FrameLayout {
         boolean on = SmartHome.configured(prefs);
         String err = home.error();
         for (HomePanel p : homePanels) p.render(home.devices(), on, err);
+        // sensor readings changed: the weather shows them too
+        HomeDevice out = outdoorSensor();
+        String sig = (out == null ? Double.NaN : out.temperature()) + indoorText(out);
+        if (!sig.equals(sensorSig)) renderWeather();
         String ev = Bambu.recentEvent(bambuEventSeen);
         if (ev != null) {
             bambuEventSeen = System.currentTimeMillis();
@@ -2298,7 +2398,8 @@ public class DashboardView extends FrameLayout {
 
     private void pollHome(boolean forceYandex) {
         boolean auto = !prefs.autoCall().isEmpty() || !prefs.autoNight().isEmpty() || !prefs.autoDawn().isEmpty();
-        if (homePanels.isEmpty() && !prefs.live() && !auto || !SmartHome.configured(prefs) || !homeBusy.compareAndSet(false, true)) return;
+        boolean wx = !weatherPanels.isEmpty() || weatherLine != null || aodInfo != null;
+        if (homePanels.isEmpty() && !prefs.live() && !auto && !wx || !SmartHome.configured(prefs) || !homeBusy.compareAndSet(false, true)) return;
         io.execute(() -> {
             try {
                 home.poll(forceYandex);
@@ -2629,6 +2730,10 @@ public class DashboardView extends FrameLayout {
             MediaMetadata md = media.getMetadata();
             playing = st != null && st.getState() == PlaybackState.STATE_PLAYING;
             track = md == null ? "" : String.valueOf(md.getString(MediaMetadata.METADATA_KEY_TITLE));
+        } else if (SpotifyBroadcast.last != null && !(spState != null && spState.hasTrack)) {
+            SpotifyBroadcast.Track sb = SpotifyBroadcast.last;
+            playing = sb.playing;
+            track = sb.title;
         } else {
             PcClient.SpState sp = spState;
             playing = sp != null && sp.hasTrack && sp.playing;
@@ -3079,17 +3184,55 @@ public class DashboardView extends FrameLayout {
         });
     }
 
+    /** The outdoor sensor: the one chosen in the settings, or one named "Улица", "Балкон"… */
+    private HomeDevice outdoorSensor() {
+        Map<String, HomeDevice> devs = home.devices();
+        String id = prefs.weatherOut();
+        if (!id.isEmpty()) {
+            HomeDevice d = devs.get(id);
+            return d != null && d.available && !Double.isNaN(d.temperature()) ? d : null;
+        }
+        for (HomeDevice d : devs.values()) {
+            if (d.available && !Double.isNaN(d.temperature()) && OUTSIDE.matcher(d.name.toLowerCase(Ui.RU)).find()) return d;
+        }
+        return null;
+    }
+
+    /** "Дома 22,4° · 41 %": the chosen sensor, or the average of the sensors and thermostats at home. */
+    private String indoorText(HomeDevice out) {
+        Map<String, HomeDevice> devs = home.devices();
+        double sum = 0;
+        int n = 0, hum = -1;
+        String id = prefs.weatherIn();
+        for (HomeDevice d : devs.values()) {
+            if (!d.available || d == out || !id.isEmpty() && !d.id.equals(id)) continue;
+            double t = d.temperature();
+            if (Double.isNaN(t) || d.kind != HomeDevice.SENSOR && d.kind != HomeDevice.CLIMATE) continue;
+            if (id.isEmpty() && OUTSIDE.matcher(d.name.toLowerCase(Ui.RU)).find()) continue;
+            sum += t;
+            n++;
+            if (hum < 0) hum = d.humidity();
+        }
+        if (n == 0) return "";
+        return "Дома " + HomeDevice.deg(Math.round(sum / n * 10) / 10.0) + (hum >= 0 ? " · " + hum + " %" : "");
+    }
+
     private void renderWeather() {
         Weather w = weather;
         String place = Weather.place(prefs);
-        for (WeatherPanel p : weatherPanels) p.render(w, place);
+        HomeDevice out = outdoorSensor();
+        double outT = out == null ? Double.NaN : out.temperature();
+        String indoor = indoorText(out);
+        sensorSig = outT + indoor;
+        for (WeatherPanel p : weatherPanels) p.render(w, place, outT, indoor);
         if (weatherLine != null) {
             if (w == null || Double.isNaN(w.temp)) {
                 weatherLine.setVisibility(GONE);
             } else {
-                StringBuilder sb = new StringBuilder(Weather.deg(w.temp)).append("  ").append(Weather.text(w.code));
+                StringBuilder sb = new StringBuilder(Weather.deg(Double.isNaN(outT) ? w.temp : outT)).append("  ").append(Weather.text(w.code));
                 Weather.Day d = w.today();
                 if (d != null) sb.append("  ·  ").append(Weather.deg(d.max)).append(" / ").append(Weather.deg(d.min));
+                if (!indoor.isEmpty()) sb.append("  ·  ").append(indoor.toLowerCase(Ui.RU));
                 weatherLine.setText(sb);
                 weatherLine.setCompoundDrawablesRelative(WeatherPanel.drawable(ctx, th, nightActive, w.code, w.isDay, px(22)), null, null, null);
                 weatherLine.setVisibility(VISIBLE);
@@ -3097,6 +3240,7 @@ public class DashboardView extends FrameLayout {
         }
         if (ribbon != null) ribbon.setData(ribbonEvents, w);
         renderFocusPills();
+        renderAodInfo();
     }
 
     private void openWeatherSheet() {
@@ -3112,7 +3256,8 @@ public class DashboardView extends FrameLayout {
                 openSettings();
             }
         });
-        p.render(weather, Weather.place(prefs));
+        HomeDevice out = outdoorSensor();
+        p.render(weather, Weather.place(prefs), out == null ? Double.NaN : out.temperature(), indoorText(out));
         openSheet(p);
         fetchWeather(false);
     }
@@ -3350,12 +3495,128 @@ public class DashboardView extends FrameLayout {
     }
 
     /** Night: the clock alone, dim, wandering slowly; under it the alarm and the morning weather. */
-    private void buildNight() {
-        bigClock = true;
+    /**
+     * The always-on screen, as on a Samsung: black, a big clock in its colours, the date, battery, weather,
+     * the next event and the music under it, wandering a little every minute. Behind it the weather moves:
+     * rain falls, snow drifts, a clear night twinkles. At night the same screen in the night tint.
+     */
+    private void buildAod() {
+        boolean night = "night".equals(look);
+        setBackgroundColor(0xFF000000);
         content.setOrientation(LinearLayout.VERTICAL);
         content.setGravity(Gravity.CENTER);
-        content.addView(buildClock(true), new LinearLayout.LayoutParams(-1, 0, 1));
-        content.setOnClickListener(v -> peek());
+        Weather w = weather;
+        String fxMode = prefs.aodFx();
+        if (w != null && w.code >= 0 && ("always".equals(fxMode) || "night".equals(fxMode) && (night || !w.isDay))) {
+            WeatherFx fx = new WeatherFx(ctx);
+            fx.set(Weather.group(w.code), night || !w.isDay, night ? th.accent : 0xFFFFFFFF);
+            addView(fx, 0, new LayoutParams(-1, -1));
+        }
+        aodClock = new AodClock(ctx);
+        String style = prefs.aodClock();
+        aodClock.setup(style, night ? new int[]{th.text} : AodClock.palette(prefs.aodColor(), th), prefs.h24());
+        int cw, ch;
+        switch (style) {
+            case "analog": cw = ch = px(200); break;
+            case "stacked": cw = px(260); ch = px(230); break;
+            default: cw = px(460); ch = px(150); break;
+        }
+        content.addView(aodClock, new LinearLayout.LayoutParams(cw, ch));
+        aodInfo = vertical();
+        aodInfo.setGravity(Gravity.CENTER_HORIZONTAL);
+        content.addView(aodInfo, margins(-2, -2, 0, 8, 0, 0));
+        renderAodInfo();
+    }
+
+    /** Lines under the always-on clock: date and battery, weather, the next event, what plays. */
+    private void renderAodInfo() {
+        if (aodInfo == null) return;
+        aodInfo.removeAllViews();
+        boolean night = "night".equals(look);
+        int main = night ? th.text : 0xFFFFFFFF, dim = night ? th.dim : 0xA6FFFFFF;
+        StringBuilder top = new StringBuilder(Ui.cap(LocalDate.now().format(DateTimeFormatter.ofPattern("EEE, d MMMM", Ui.RU))));
+        if (prefs.aodShows("battery")) {
+            Intent b = ctx.registerReceiver(null, new IntentFilter(Intent.ACTION_BATTERY_CHANGED));
+            if (b != null) {
+                int lvl = b.getIntExtra(BatteryManager.EXTRA_LEVEL, -1), sc = b.getIntExtra(BatteryManager.EXTRA_SCALE, 100);
+                boolean plugged = b.getIntExtra(BatteryManager.EXTRA_PLUGGED, 0) != 0;
+                if (lvl >= 0) top.append("   ").append(plugged ? "⚡" : "").append(Math.round(100f * lvl / sc)).append(" %");
+            }
+        }
+        aodLine(top.toString(), main, 18, 600, 0);
+        Weather w = weather;
+        if (prefs.aodShows("weather") && w != null && !Double.isNaN(w.temp)) {
+            HomeDevice out = outdoorSensor();
+            double t = out != null ? out.temperature() : w.temp;
+            TextView l = aodLine(Weather.deg(t) + "  " + Weather.text(w.code), main, 16, 500, 4);
+            l.setCompoundDrawablesRelative(WeatherPanel.drawable(ctx, th, night, w.code, w.isDay, px(20)), null, null, null);
+            l.setCompoundDrawablePadding(px(8));
+        }
+        if (night && !nightText.isEmpty()) {
+            for (String line : nightText.split("\n")) aodLine(line, dim, 15, 400, 4);
+        } else if (prefs.aodShows("events")) {
+            String next = nextHint();
+            if (!next.isEmpty()) aodLine(next.split("\n")[next.split("\n").length - 1], dim, 15, 400, 4);
+        }
+        if (prefs.aodShows("music")) {
+            String[] np = nowPlaying();
+            if (np != null) aodLine("♪  " + np[0] + (np[1].isEmpty() ? "" : " — " + np[1]), dim, 15, 400, 4);
+        }
+    }
+
+    private TextView aodLine(String s, int color, float sp, int weight, float top) {
+        TextView t = Ui.text(ctx, color, sp, weight);
+        t.setText(s);
+        t.setSingleLine();
+        t.setEllipsize(TextUtils.TruncateAt.END);
+        t.setMaxWidth(px(520));
+        t.setGravity(Gravity.CENTER_VERTICAL);
+        aodInfo.addView(t, margins(-2, -2, 0, top, 0, 0));
+        return t;
+    }
+
+    /** {title, artist} of what plays now (this phone, Spotify's broadcast or Spotify elsewhere), null when silent. */
+    private String[] nowPlaying() {
+        MediaMetadata md = media == null ? null : media.getMetadata();
+        PlaybackState st = media == null ? null : media.getPlaybackState();
+        if (md != null && st != null && st.getState() == PlaybackState.STATE_PLAYING) {
+            String a = md.getString(MediaMetadata.METADATA_KEY_ARTIST);
+            return new String[]{String.valueOf(md.getString(MediaMetadata.METADATA_KEY_TITLE)), a == null ? "" : a};
+        }
+        SpotifyBroadcast.Track sb = SpotifyBroadcast.last;
+        if (media == null && sb != null && sb.playing && !sb.title.isEmpty()) return new String[]{sb.title, sb.artist};
+        PcClient.SpState sp = spState;
+        if (sp != null && sp.hasTrack && sp.playing) return new String[]{sp.title, sp.artist};
+        return null;
+    }
+
+    /** A call is on (on the phone or the PC): no always-on screen then. */
+    private boolean inCall() {
+        PcClient.Calls pcc = pcOnline ? pcCalls : null;
+        return phoneCall != null || pcc != null && !pcc.calls.isEmpty();
+    }
+
+    /** Touches: remember the time (for the always-on screen); the first touch of the always-on or night screen only wakes it. */
+    @Override
+    public boolean dispatchTouchEvent(MotionEvent e) {
+        if (e.getActionMasked() == MotionEvent.ACTION_DOWN) {
+            lastTouch = SystemClock.elapsedRealtime();
+            if ("aod".equals(look) || "night".equals(look) && !peeking) {
+                swallow = true;
+                if (aod) {
+                    aod = false;
+                    build();
+                } else {
+                    peek();
+                }
+                return true;
+            }
+        }
+        if (swallow) {
+            if (e.getActionMasked() == MotionEvent.ACTION_UP || e.getActionMasked() == MotionEvent.ACTION_CANCEL) swallow = false;
+            return true;
+        }
+        return super.dispatchTouchEvent(e);
     }
 
     /** id, icon, name of the dock sections. */
@@ -3585,6 +3846,12 @@ public class DashboardView extends FrameLayout {
         PhoneCalls.Call c = PhoneCalls.current(ctx);
         PhoneCalls.Call was = phoneCall;
         phoneCall = c;
+        if (c != null && aod) {
+            // a call wakes the dashboard
+            aod = false;
+            lastTouch = SystemClock.elapsedRealtime();
+            build();
+        }
         boolean changed = (c == null) != (was == null) || c != null && (!c.key.equals(was.key) || c.ringing != was.ringing);
         if (changed) {
             callsSig = "";

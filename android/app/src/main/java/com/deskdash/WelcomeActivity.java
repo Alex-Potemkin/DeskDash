@@ -369,9 +369,9 @@ public class WelcomeActivity extends Activity {
                 CalendarRepo.hasPermission(this) ? "" : "Разрешить",
                 v -> requestPermissions(new String[]{Manifest.permission.READ_CALENDAR}, 1));
         connRow(body, R.drawable.ic_music, "Музыка и звонки на телефоне", MusicWatcher.hasAccess(this) ? "Доступ есть"
-                        : "Что играет, и звонки Telegram, WhatsApp, Zoom с кнопками на дашборде",
+                        : "Один переключатель: что играет в любом плеере и звонки Telegram, WhatsApp, Zoom",
                 MusicWatcher.hasAccess(this) ? "" : "Разрешить",
-                v -> open(new Intent(Settings.ACTION_NOTIFICATION_LISTENER_SETTINGS)));
+                v -> open(MusicWatcher.accessIntent(this)));
         connRow(body, R.drawable.ic_home, "Хаб Raspberry Pi", hubSet ? "Подключён: " + prefs.hubUrl()
                         : "Умный дом и ПК через хаб, если он есть",
                 hubSet ? "Заново" : "Найти", v -> Setup.findHub(this, prefs, this::render));

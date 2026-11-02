@@ -151,6 +151,11 @@ final class WeatherPanel extends LinearLayout {
     }
 
     void render(Weather w, String place) {
+        render(w, place, Double.NaN, "");
+    }
+
+    /** outT: the outdoor sensor's temperature (NaN: the forecast's); indoor: "Дома 22,4° · 41 %" or "". */
+    void render(Weather w, String place, double outT, String indoor) {
         boolean has = w != null && !Double.isNaN(w.temp);
         empty.setVisibility(has ? GONE : VISIBLE);
         now.setVisibility(has ? VISIBLE : GONE);
@@ -162,14 +167,16 @@ final class WeatherPanel extends LinearLayout {
         }
         icon.set(w.code, w.isDay);
         if (sky) setBackground(skyBg(w.code, w.isDay));
-        temp.setText(Weather.deg(w.temp));
+        temp.setText(Weather.deg(Double.isNaN(outT) ? w.temp : outT));
         cond.setText(Weather.text(w.code));
         StringBuilder sb = new StringBuilder();
         if (!Double.isNaN(w.feels) && Math.round(w.feels) != Math.round(w.temp)) sb.append("ощущается ").append(Weather.deg(w.feels)).append(" · ");
         Weather.Day td = w.today();
         if (compact && td != null) sb.append(Weather.deg(td.max)).append(" / ").append(Weather.deg(td.min)).append(" · ");
         sb.append("ветер ").append(Math.round(w.wind)).append(" м/с");
-        if (!place.isEmpty() && !compact) sb.append('\n').append(place);
+        if (!Double.isNaN(outT)) sb.append(" · по датчику");
+        if (!indoor.isEmpty()) sb.append('\n').append(indoor);
+        else if (!place.isEmpty() && !compact) sb.append('\n').append(place);
         more.setText(sb);
 
         hours.removeAllViews();
