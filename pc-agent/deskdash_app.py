@@ -2,6 +2,10 @@
 
 Built into DeskDash.exe / DeskDash-linux-x86_64 with build_exe.py. Runs the agent in the background
 and lives in the tray (or the taskbar where the desktop has no tray).
+
+On Windows the window looks like Windows 11: light or dark like the system, the system accent colour,
+toggle switches and settings cards, and a "Главная" page that walks through connecting the phone and
+then shows the day, the current call and quick macros. The Linux build keeps its own quiet dark look.
 """
 import copy
 import ctypes
@@ -10,6 +14,7 @@ import os
 import queue
 import re
 import secrets
+import subprocess
 import sys
 import threading
 import time
@@ -37,8 +42,55 @@ except Exception:  # noqa: BLE001 — e.g. PyGObject present but no GTK/AppIndic
 import deskdash_agent as agent
 import spotify
 
+BRAND_BG, BRAND_TEXT, BRAND_ACCENT = "#141110", "#EDE6DD", "#C8A27C"
 BG, HOVER, LINE = "#141110", "#1D1816", "#2A2320"
 TEXT, DIM, FAINT, ACCENT, DANGER = "#EDE6DD", "#8A7F76", "#5A514B", "#C8A27C", "#E5534B"
+CARD, ON_ACCENT, LIGHT = HOVER, BG, False
+
+
+def _mix(a, b, t):
+    """Blend two (r, g, b) colours, t = share of b; returns "#rrggbb"."""
+    return "#%02x%02x%02x" % tuple(round(x * (1 - t) + y * t) for x, y in zip(a, b))
+
+
+def _win_palette():
+    """Windows 11 colours: light or dark as the system says (or as set in Настройки → Оформление), its accent."""
+    global BG, HOVER, LINE, TEXT, DIM, FAINT, ACCENT, DANGER, CARD, ON_ACCENT, LIGHT
+    try:
+        mode = agent.config().get("ui_theme", "system")
+    except Exception:  # noqa: BLE001 — unreadable config: follow the system
+        mode = "system"
+    light = mode == "light"
+    if mode == "system":
+        try:
+            with winreg.OpenKey(winreg.HKEY_CURRENT_USER,
+                                r"Software\Microsoft\Windows\CurrentVersion\Themes\Personalize") as k:
+                light = winreg.QueryValueEx(k, "AppsUseLightTheme")[0] == 1
+        except OSError:
+            pass
+    accent = (0x00, 0x67, 0xC0)  # Windows' default blue
+    try:
+        with winreg.OpenKey(winreg.HKEY_CURRENT_USER, r"Software\Microsoft\Windows\DWM") as k:
+            v = winreg.QueryValueEx(k, "AccentColor")[0]  # 0xAABBGGRR
+            accent = (v & 0xFF, (v >> 8) & 0xFF, (v >> 16) & 0xFF)
+    except OSError:
+        pass
+    LIGHT = light
+    if light:
+        BG, CARD, HOVER, LINE = "#F3F3F3", "#FBFBFB", "#EAEAEA", "#E3E3E3"
+        TEXT, DIM, FAINT, DANGER = "#1B1B1B", "#5D5D5D", "#8B8B8B", "#C42B1C"
+        ACCENT = _mix(accent, (0, 0, 0), 0.12)
+    else:
+        BG, CARD, HOVER, LINE = "#1F1F1F", "#2A2A2A", "#323232", "#3A3A3A"
+        TEXT, DIM, FAINT, DANGER = "#F3F3F3", "#B4B4B4", "#7A7A7A", "#FF99A4"
+        ACCENT = _mix(accent, (255, 255, 255), 0.38)
+    r, g, b = int(ACCENT[1:3], 16), int(ACCENT[3:5], 16), int(ACCENT[5:7], 16)
+    ON_ACCENT = "#000000" if 0.299 * r + 0.587 * g + 0.114 * b > 150 else "#FFFFFF"
+
+
+if IS_WIN:
+    _win_palette()
+
 APP_ID = "DeskDash"
 RUN_KEY = r"Software\Microsoft\Windows\CurrentVersion\Run"
 
@@ -109,11 +161,11 @@ def make_icon(size):
     s = size
     img = Image.new("RGBA", (s, s), (0, 0, 0, 0))
     d = ImageDraw.Draw(img)
-    d.rounded_rectangle([0, 0, s - 1, s - 1], radius=int(s * 0.22), fill=BG)
+    d.rounded_rectangle([0, 0, s - 1, s - 1], radius=int(s * 0.22), fill=BRAND_BG)
     w = max(2, int(s * 0.07))
-    d.ellipse([s * 0.2, s * 0.2, s * 0.8, s * 0.8], outline=TEXT, width=w)
+    d.ellipse([s * 0.2, s * 0.2, s * 0.8, s * 0.8], outline=BRAND_TEXT, width=w)
     c = s / 2
-    d.line([(c, s * 0.32), (c, c), (s * 0.63, s * 0.6)], fill=ACCENT, width=w, joint="curve")
+    d.line([(c, s * 0.32), (c, c), (s * 0.63, s * 0.6)], fill=BRAND_ACCENT, width=w, joint="curve")
     return img
 
 
@@ -193,14 +245,15 @@ def ago(t):
 
 
 def dark_title_bar(win):
-    """Dark, background-coloured native title bar (Windows 10 20H1+ / 11)."""
+    """Native title bar in the window's colours, dark or light, rounded corners (Windows 10 20H1+ / 11)."""
     if not IS_WIN:
         return
     try:
         hwnd = ctypes.windll.user32.GetParent(win.winfo_id())
         dwm = ctypes.windll.dwmapi
-        on = ctypes.c_int(1)
+        on = ctypes.c_int(0 if LIGHT else 1)
         dwm.DwmSetWindowAttribute(hwnd, 20, ctypes.byref(on), 4)  # DWMWA_USE_IMMERSIVE_DARK_MODE
+        dwm.DwmSetWindowAttribute(hwnd, 33, ctypes.byref(ctypes.c_int(2)), 4)  # DWMWA_WINDOW_CORNER_PREFERENCE: round
 
         def colorref(hex_color):
             r, g, b = int(hex_color[1:3], 16), int(hex_color[3:5], 16), int(hex_color[5:7], 16)
@@ -298,10 +351,16 @@ def validate(m):
 class F:
     """Fonts, resolved once the Tk root exists (Segoe UI Variable on Windows 11, Segoe UI otherwise)."""
     display = text = semi = icon = mono = None
+    scale = 1.0
 
     @classmethod
-    def init(cls):
+    def init(cls, root=None):
         fams = set(tkfont.families())
+        if root is not None:
+            try:
+                cls.scale = max(1.0, root.winfo_fpixels("1i") / 96)
+            except tk.TclError:
+                pass
 
         def pick(*names):
             return next((n for n in names if n in fams), "Segoe UI" if IS_WIN else "TkDefaultFont")
@@ -377,6 +436,105 @@ class Field(tk.Frame):
             var.trace_add("write", lambda *_: on_change())
 
 
+def S(v):
+    """Pixels for canvas-drawn controls, scaled with the display."""
+    return int(round(v * F.scale))
+
+
+def rrect(c, x0, y0, x1, y1, r, fill, outline=""):
+    """Rounded rectangle on a canvas from arcs and rectangles (Tk has none)."""
+    r = min(r, (x1 - x0) / 2, (y1 - y0) / 2)
+    kw = {"fill": fill, "outline": fill}
+    c.create_rectangle(x0 + r, y0, x1 - r, y1, width=0, **kw)
+    c.create_rectangle(x0, y0 + r, x1, y1 - r, width=0, **kw)
+    for x, y, start in ((x0, y0, 90), (x1 - 2 * r, y0, 0), (x0, y1 - 2 * r, 180), (x1 - 2 * r, y1 - 2 * r, 270)):
+        c.create_arc(x, y, x + 2 * r, y + 2 * r, start=start, extent=90, style="pieslice", width=0, **kw)
+    if outline:
+        for x, y, start in ((x0, y0, 90), (x1 - 2 * r, y0, 0), (x0, y1 - 2 * r, 180), (x1 - 2 * r, y1 - 2 * r, 270)):
+            c.create_arc(x, y, x + 2 * r, y + 2 * r, start=start, extent=90, style="arc", outline=outline)
+        c.create_line(x0 + r, y0, x1 - r, y0, fill=outline)
+        c.create_line(x0 + r, y1 - 1, x1 - r, y1 - 1, fill=outline)
+        c.create_line(x0, y0 + r, x0, y1 - r, fill=outline)
+        c.create_line(x1 - 1, y0 + r, x1 - 1, y1 - r, fill=outline)
+
+
+class WinToggle(tk.Frame):
+    """Windows 11 toggle switch with its label: a pill that is the accent colour when on."""
+
+    def __init__(self, parent, text, value, command):
+        super().__init__(parent, bg=bg_of(parent), cursor="hand2")
+        self.text, self.value, self.command = text, bool(value), command
+        self.cv = tk.Canvas(self, width=S(40), height=S(20), bg=bg_of(parent), highlightthickness=0, bd=0)
+        self.cv.pack(side="left")
+        self.lbl = txt(self, "", 10, TEXT)
+        if text:
+            self.lbl.pack(side="left", padx=(S(10), 0))
+        for w in (self, self.cv, self.lbl):
+            w.bind("<Button-1>", lambda e: self.flip())
+            w.bind("<Enter>", lambda e: self._paint(True))
+            w.bind("<Leave>", lambda e: self._paint(False))
+        self._paint()
+
+    def flip(self):
+        self.value = not self.value
+        self._paint()
+        self.command(self.value)
+
+    def set(self, v):
+        self.value = bool(v)
+        self._paint()
+
+    def _paint(self, hover=False):
+        c, w, h = self.cv, S(40), S(20)
+        c.delete("all")
+        bg = bg_of(self)
+        if self.value:
+            rrect(c, 0, 0, w, h, h / 2, ACCENT)
+            k = S(6 if not hover else 7)
+            c.create_oval(w - h / 2 - k, h / 2 - k, w - h / 2 + k, h / 2 + k, fill=ON_ACCENT, outline=ON_ACCENT)
+        else:
+            rrect(c, 0, 0, w, h, h / 2, DIM)
+            rrect(c, 1, 1, w - 1, h - 1, h / 2 - 1, HOVER if hover else bg)
+            k = S(5 if not hover else 6)
+            c.create_oval(h / 2 - k, h / 2 - k, h / 2 + k, h / 2 + k, fill=DIM, outline=DIM)
+        self.lbl.config(text=self.text, fg=TEXT)
+
+
+class WinButton(tk.Canvas):
+    """Windows 11 button: accent fill for the main action, a quiet card colour for the rest."""
+
+    def __init__(self, parent, text, command, primary=False, size=10):
+        font = tkfont.Font(family=F.semi if primary else F.text, size=size)
+        w, h = font.measure(text) + S(30), font.metrics("linespace") + S(14)
+        super().__init__(parent, width=w, height=h, bg=bg_of(parent), highlightthickness=0, bd=0, cursor="hand2")
+        self.text, self.font, self.primary, self.command = text, font, primary, command
+        self.bind("<Button-1>", lambda e: self.command())
+        self.bind("<Enter>", lambda e: self._paint(True))
+        self.bind("<Leave>", lambda e: self._paint(False))
+        self._paint()
+
+    def _paint(self, hover=False):
+        self.delete("all")
+        w, h = int(self.cget("width")), int(self.cget("height"))
+        if self.primary:
+            fill, fg = (_shade(ACCENT, 0.1) if hover else ACCENT), ON_ACCENT
+        else:
+            fill, fg = (LINE if hover else HOVER), TEXT
+        rrect(self, 0, 0, w, h, S(5), fill)
+        self.create_text(w / 2, h / 2, text=self.text, fill=fg, font=self.font)
+
+
+def _shade(color, t):
+    """A hover shade of an accent: towards white on dark windows, towards black on light ones."""
+    rgb = (int(color[1:3], 16), int(color[3:5], 16), int(color[5:7], 16))
+    return _mix(rgb, (0, 0, 0) if LIGHT else (255, 255, 255), t)
+
+
+def card(parent, **kw):
+    """Windows 11 settings card: a slightly lighter (or white) panel with a hairline border."""
+    return tk.Frame(parent, bg=CARD, highlightthickness=1, highlightbackground=LINE, highlightcolor=LINE, **kw)
+
+
 class Toggle(tk.Label):
     """"●  text" / "○  text" switch."""
 
@@ -397,6 +555,10 @@ class Toggle(tk.Label):
 
     def _paint(self):
         self.config(text=("●   " if self.value else "○   ") + self.text, fg=TEXT if self.value else DIM)
+
+
+if IS_WIN:
+    Toggle = WinToggle  # noqa: F811 — the same API, drawn like Windows 11
 
 
 def popup(widget, options, command):
@@ -433,7 +595,7 @@ class Scroll(tk.Frame):
 class App(tk.Tk):
     def __init__(self, server, error, minimized):
         super().__init__()
-        F.init()
+        F.init(self)
         self.server = server
         self.error = error
         self.events = queue.Queue()
@@ -469,13 +631,14 @@ class App(tk.Tk):
             self.state_lbl.config(text=f"●  в сети · порт {agent.config()['port']}")
 
         self.nav = {}
-        for key, icon, name in NAV:
+        nav = ([("home", "\ue80f", "Главная")] if IS_WIN else []) + NAV
+        for key, icon, name in nav:
             row = tk.Frame(side, bg=BG, cursor="hand2")
-            row.pack(fill="x", pady=1)
-            bar = tk.Frame(row, bg=BG, width=2)
-            bar.pack(side="left", fill="y")
+            row.pack(fill="x", pady=1, padx=(8, 8) if IS_WIN else 0)
+            bar = tk.Frame(row, bg=BG, width=3 if IS_WIN else 2)
+            bar.pack(side="left", fill="y", pady=(9, 9) if IS_WIN else 0)
             ic = txt(row, glyph(icon), 11, DIM, F.icon)
-            ic.pack(side="left", padx=(26, 12), pady=9)
+            ic.pack(side="left", padx=(18 if IS_WIN else 26, 12), pady=9)
             lb = txt(row, name, 10, DIM)
             lb.pack(side="left")
             for w in (row, ic, lb):
@@ -483,7 +646,7 @@ class App(tk.Tk):
                 w.bind("<Enter>", lambda e, k=key: self._nav_hover(k, True))
                 w.bind("<Leave>", lambda e, k=key: self._nav_hover(k, False))
             self.nav[key] = (bar, ic, lb)
-        txt(side, "v1.2", 8, FAINT).pack(side="bottom", anchor="w", padx=28, pady=24)
+        txt(side, "v1.3", 8, FAINT).pack(side="bottom", anchor="w", padx=28, pady=24)
 
         self.pages = {
             "conn": ConnectionPage(self.body, self),
@@ -491,10 +654,12 @@ class App(tk.Tk):
             "spotify": SpotifyPage(self.body, self),
             "settings": SettingsPage(self.body, self),
         }
+        if IS_WIN:
+            self.pages["home"] = HomePage(self.body, self)
         self.editor = self.pages["macros"]
         self.spotify_tab = self.pages["spotify"]
         self.current = None
-        self.show_page("conn")
+        self.show_page("home" if IS_WIN else "conn")
 
         self.protocol("WM_DELETE_WINDOW", self.on_close)
         agent.ON_SHOW = lambda: self.events.put("show")
@@ -525,15 +690,30 @@ class App(tk.Tk):
         self.pages[key].pack(fill="both", expand=True, padx=(44, 40), pady=(34, 24))
         for k, (bar, ic, lb) in self.nav.items():
             on = k == key
+            if IS_WIN:
+                # Windows 11: the selected item sits on a soft fill with a short accent pill on the left
+                row_bg = HOVER if on else BG
+                for w in (bar.master, ic, lb):
+                    w.config(bg=row_bg)
+                bar.config(bg=ACCENT if on else row_bg)
+                ic.config(fg=ACCENT if on else DIM)
+                lb.config(fg=TEXT)
+                continue
             bar.config(bg=ACCENT if on else BG)
             ic.config(fg=ACCENT if on else DIM)
             lb.config(fg=TEXT if on else DIM)
 
     def _nav_hover(self, key, inside):
-        if key != self.current:
-            _, ic, lb = self.nav[key]
-            lb.config(fg=TEXT if inside else DIM)
-            ic.config(fg=TEXT if inside else DIM)
+        if key == self.current:
+            return
+        bar, ic, lb = self.nav[key]
+        if IS_WIN:
+            row_bg = HOVER if inside else BG
+            for w in (bar.master, bar, ic, lb):
+                w.config(bg=row_bg)
+            return
+        lb.config(fg=TEXT if inside else DIM)
+        ic.config(fg=TEXT if inside else DIM)
 
     # ---------------------------------------------------------- tray
 
@@ -778,6 +958,9 @@ class SettingsPage(tk.Frame):
         self.name_var = tk.StringVar(value=cfg.get("name", ""))
         self.port_var = tk.StringVar(value=str(cfg.get("port", 8765)))
         self.mac_var = tk.StringVar(value=cfg.get("mac", ""))
+        if IS_WIN:
+            self._win_layout(cfg)
+            return
 
         txt(self, "Настройки", 20, TEXT, F.display).pack(anchor="w", pady=(0, 28))
         grid = tk.Frame(self, bg=BG)
@@ -810,10 +993,64 @@ class SettingsPage(tk.Frame):
         self.status = txt(self, "", 9, DIM)
         self.status.pack(side="bottom", anchor="w")
 
+    def _win_layout(self, cfg):
+        """Windows 11 settings: one card per setting, icon, title and description on the left, the control on the right."""
+        txt(self, "Настройки", 20, TEXT, F.display).pack(anchor="w", pady=(0, 18))
+        area = Scroll(self)
+        area.pack(fill="both", expand=True)
+        body = area.inner
+
+        def row(glyph_ch, title, desc, factory):
+            c = card(body)
+            c.pack(fill="x", pady=(0, 4))
+            txt(c, glyph(glyph_ch), 14, TEXT, F.icon).pack(side="left", padx=(18, 16), pady=14)
+            words = tk.Frame(c, bg=CARD)
+            words.pack(side="left", fill="x", expand=True, pady=10)
+            txt(words, title, 10, TEXT).pack(anchor="w")
+            if desc:
+                txt(words, desc, 8, DIM).pack(anchor="w")
+            factory(c).pack(side="right", padx=(12, 18))
+
+        def group(name):
+            txt(body, name, 10, TEXT, F.semi).pack(anchor="w", pady=(14, 6))
+
+        group("Этот компьютер")
+        row("\ue7f4", "Имя на телефоне", "так компьютер подписан на дашборде",
+            lambda p: Field(p, self.name_var, 10, width=24, on_commit=self.save))
+        row("\ue774", "MAC для пробуждения", f"пусто — {agent.default_mac()}",
+            lambda p: Field(p, self.mac_var, 10, F.mono, width=18, on_commit=self.save))
+        row("\ue968", "Порт", "меняется после перезапуска DeskDash",
+            lambda p: Field(p, self.port_var, 10, width=7, on_commit=self.save))
+        group("Поведение")
+        row("\ue7e8", "Запускать вместе с Windows", "свёрнутым в трей, телефон сразу видит компьютер",
+            lambda p: Toggle(p, "", get_autostart(), self._autostart))
+        row("\ue8bb", "Кнопка «закрыть» сворачивает в трей", "иначе закрывает DeskDash совсем",
+            lambda p: Toggle(p, "", cfg.get("tray_on_close", True), lambda v: self._set("tray_on_close", v)))
+        row("\ue714", "Экран ПК на телефоне", "во время созвонов телефон показывает экран и вебку",
+            lambda p: Toggle(p, "", cfg.get("stream", True), lambda v: self._set("stream", v)))
+        group("Оформление")
+        names = {"system": "Как в Windows", "dark": "Тёмное", "light": "Светлое"}
+
+        def theme_ctl(p):
+            lbl = link(p, names.get(cfg.get("ui_theme", "system"), "Как в Windows") + "  \u25be", lambda: None, TEXT, ACCENT)
+            lbl.bind("<Button-1>", lambda e: popup(lbl, list(names.items()), lambda v: self._theme(v, lbl, names)))
+            return lbl
+
+        row("\ue790", "Тема окна", "светлая или тёмная; цвет акцента берётся из Windows", theme_ctl)
+        link(body, "открыть папку с настройками", lambda: agent.sysapi.open_target(agent.DATA_DIR), DIM, TEXT, 9).pack(
+            anchor="w", pady=(14, 0))
+        self.status = txt(self, "", 9, DIM)
+        self.status.pack(side="bottom", anchor="w")
+
+    def _theme(self, value, lbl, names):
+        edit_config(lambda c: c.__setitem__("ui_theme", value))
+        lbl.config(text=names[value] + "  \u25be")
+        self._say("тема сменится после перезапуска DeskDash")
+
     def _say(self, msg, error=False):
         self.status.config(text=msg, fg=DANGER if error else DIM)
         if not error:
-            self.after(1800, lambda: self.status.config(text=""))
+            self.after(2600, lambda: self.status.config(text=""))
 
     def _set(self, key, value):
         edit_config(lambda c: c.__setitem__(key, value))
@@ -844,6 +1081,263 @@ class SettingsPage(tk.Frame):
 
         edit_config(upd)
         self._say("сохранено" + (" · порт изменится после перезапуска" if port != cfg["port"] else ""))
+
+
+# ================================================================ home page (Windows)
+
+def _hm(minutes):
+    h, m = divmod(int(minutes), 60)
+    return f"{h} ч {m} мин" if h and m else f"{h} ч" if h else f"{m} мин"
+
+
+def _hidden_run(args, timeout=6):
+    """A console command without flashing a console window; its output, or "" on any failure."""
+    try:
+        out = subprocess.run(args, capture_output=True, timeout=timeout,
+                             creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0)).stdout
+        return (out or b"").decode("cp866" if IS_WIN else "utf-8", errors="replace")  # console tools speak OEM
+    except Exception:  # noqa: BLE001
+        return ""
+
+
+class HomePage(tk.Frame):
+    """Windows: the steps to connect a phone until one has connected, then the day at a glance:
+    time at the computer, the call going on with its microphone button, and macros to run right here."""
+
+    def __init__(self, parent, app):
+        super().__init__(parent, bg=BG)
+        self.app = app
+        self.sig = None
+        self.firewall = None   # True / False once checked
+        self.private = None    # the Wi-Fi profile is "Private"
+        self.call_state = {"calls": [], "mic_muted": None}
+        hour = time.localtime().tm_hour
+        hello = "Доброе утро" if 5 <= hour < 12 else "Добрый день" if hour < 18 else "Добрый вечер" if hour < 23 else "Доброй ночи"
+        txt(self, hello, 20, TEXT, F.display).pack(anchor="w")
+        self.sub = txt(self, "", 10, DIM)
+        self.sub.pack(anchor="w", pady=(2, 16))
+        self.grid_ = tk.Frame(self, bg=BG)
+        self.grid_.pack(fill="both", expand=True)
+        self.grid_.columnconfigure(0, weight=1, uniform="c")
+        self.grid_.columnconfigure(1, weight=1, uniform="c")
+        self.phone = card(self.grid_)
+        self.phone.grid(row=0, column=0, sticky="nsew", padx=(0, 6), pady=(0, 12))
+        self.today = card(self.grid_)
+        self.today.grid(row=0, column=1, sticky="nsew", padx=(6, 0), pady=(0, 12))
+        self.call = card(self.grid_)
+        self.call.grid(row=1, column=0, sticky="nsew", padx=(0, 6))
+        self.quick = card(self.grid_)
+        self.quick.grid(row=1, column=1, sticky="nsew", padx=(6, 0))
+        threading.Thread(target=self._checks, daemon=True).start()
+        threading.Thread(target=self._call_loop, daemon=True).start()
+        self._refresh()
+
+    # ---------------------------------------------------------- background checks
+
+    def _checks(self):
+        out = _hidden_run(["netsh", "advfirewall", "firewall", "show", "rule", "name=DeskDash TCP"])
+        self.firewall = "DeskDash TCP" in out
+        out = _hidden_run(["powershell", "-NoProfile", "-Command", "(Get-NetConnectionProfile).NetworkCategory"])
+        cats = out.split()
+        self.private = None if not cats else all(c in ("Private", "DomainAuthenticated") for c in cats)
+
+    def _call_loop(self):
+        import calls as calls_mod
+        while True:
+            if getattr(self.app, "visible", False) and self.app.current == "home":
+                try:
+                    self.call_state = calls_mod.state()
+                except Exception:  # noqa: BLE001 — keep the last state
+                    pass
+            time.sleep(3)
+
+    # ---------------------------------------------------------- render
+
+    def _refresh(self):
+        try:
+            self._render()
+        finally:
+            self.after(3000, self._refresh)
+
+    def _render(self):
+        cfg = agent.config()
+        phones = sorted(agent.CLIENTS.items(), key=lambda kv: -kv[1][0])
+        live = [ip for ip, (t, ok) in phones if ok and time.time() - t < 15]
+        try:
+            day = agent.DAYS.day()
+        except Exception:  # noqa: BLE001
+            day = {"active_min": 0, "hours": [0] * 24, "apps": [], "calls": [], "call_min": 0, "first": "", "last": ""}
+        cs = self.call_state
+        sig = json.dumps([[(ip, ok, int(time.time() - t) // 30) for ip, (t, ok) in phones], self.firewall, self.private,
+                          cfg["token"], day["active_min"], len(day["calls"]), [c.get("id") for c in cs.get("calls", [])],
+                          cs.get("mic_muted"), [m.get("label") for m in cfg.get("macros", [])]], default=str)
+        ips = rank_ips(agent.local_ips())
+        self.sub.config(text=f"{cfg['name']}  ·  {ips[0] if ips else '?'}  ·  "
+                             + ("телефон на связи" if live else "ждёт телефон"))
+        if sig == self.sig:
+            self._tick_call()
+            return
+        self.sig = sig
+        self._phone_card(cfg, phones, live)
+        self._today_card(day)
+        self._call_card(cs)
+        self._quick_card(cfg)
+
+    def _clear(self, c):
+        for w in c.winfo_children():
+            w.destroy()
+
+    def _title(self, c, glyph_ch, text):
+        r = tk.Frame(c, bg=CARD)
+        r.pack(fill="x", padx=18, pady=(14, 8))
+        txt(r, glyph(glyph_ch), 12, ACCENT, F.icon).pack(side="left")
+        txt(r, text, 11, TEXT, F.semi).pack(side="left", padx=(10, 0))
+        return r
+
+    def _phone_card(self, cfg, phones, live):
+        c = self.phone
+        self._clear(c)
+        if any(ok for _, (t, ok) in phones):
+            self._title(c, "\ue8ea", "Телефоны")
+            for ip, (t, ok) in phones[:4]:
+                r = tk.Frame(c, bg=CARD)
+                r.pack(fill="x", padx=18, pady=2)
+                fresh = time.time() - t < 15
+                txt(r, "●", 9, ACCENT if fresh and ok else DANGER if not ok else FAINT).pack(side="left")
+                txt(r, ip, 10, TEXT).pack(side="left", padx=(10, 12))
+                txt(r, ("на связи" if fresh else "был " + ago(t)) if ok else "неверный токен", 9, DIM).pack(side="left")
+            tok = tk.Frame(c, bg=CARD)
+            tok.pack(fill="x", padx=18, pady=(10, 14))
+            txt(tok, "Токен для нового телефона", 9, DIM).pack(side="left")
+            link(tok, cfg["token"], lambda: self._copy(cfg["token"]), TEXT, ACCENT, 10, F.mono).pack(side="left", padx=(10, 0))
+            return
+        self._title(c, "\ue8ea", "Подключите телефон")
+
+        def step(n, done, text, action=None, action_text=""):
+            r = tk.Frame(c, bg=CARD)
+            r.pack(fill="x", padx=18, pady=4)
+            if action and not done:
+                WinButton(r, action_text, action).pack(side="right", padx=(8, 0))  # first, so the text wraps around it
+            txt(r, "\u2713" if done else str(n), 10, ACCENT if done else DIM, F.semi, width=2).pack(side="left")
+            txt(r, text, 10, TEXT if not done else DIM, wraplength=S(200 if action and not done else 290),
+                justify="left").pack(side="left", padx=(8, 0))
+
+        step(1, self.firewall is True, "Разрешить DeskDash в брандмауэре", self._firewall, "Разрешить")
+        step(2, self.private is True, "Сеть Wi-Fi — «Частная»" + ("" if self.private is not None else " (проверь)"),
+             lambda: os.startfile("ms-settings:network-status"), "Открыть")
+        step(3, False, "На телефоне: DeskDash → Настройки → «Найти всё в сети» и этот токен:")
+        t = tk.Frame(c, bg=CARD)
+        t.pack(fill="x", padx=18, pady=(4, 14))
+        link(t, cfg["token"], lambda: self._copy(cfg["token"]), TEXT, ACCENT, 22, F.display).pack(side="left", padx=(30, 0))
+        txt(t, "нажми, чтобы скопировать", 8, FAINT).pack(side="left", padx=(12, 0), pady=(8, 0))
+
+    def _today_card(self, day):
+        c = self.today
+        self._clear(c)
+        self._title(c, "\ue9d2", "Сегодня за компьютером")
+        top = tk.Frame(c, bg=CARD)
+        top.pack(fill="x", padx=18)
+        txt(top, _hm(day["active_min"]), 20, TEXT, F.display).pack(side="left")
+        if day.get("first"):
+            txt(top, f"с {day['first']} до {day['last']}", 9, DIM).pack(side="left", padx=(12, 0), pady=(10, 0))
+        hours = day.get("hours") or [0] * 24
+        w, h = S(300), S(46)
+        cv = tk.Canvas(c, width=w, height=h + S(14), bg=CARD, highlightthickness=0, bd=0)
+        cv.pack(anchor="w", padx=18, pady=(8, 2))
+        bw = w / 24
+        top_v = max(1, max(hours))
+        now_h = time.localtime().tm_hour
+        for i, v in enumerate(hours):
+            bh = max(S(2), h * v / top_v) if v else S(2)
+            rrect(cv, i * bw + 1, h - bh, (i + 1) * bw - 1, h, S(2), ACCENT if v else LINE)
+            if i % 6 == 0:
+                cv.create_text(i * bw + 1, h + S(8), text=str(i), fill=FAINT, anchor="w", font=(F.text, 7))
+        cv.create_line(now_h * bw + bw / 2, 0, now_h * bw + bw / 2, h, fill=DIM, dash=(2, 2))
+        lines = []
+        if day.get("calls"):
+            lines.append(f"Созвоны: {len(day['calls'])} · {_hm(day.get('call_min', 0))}")
+        apps = ", ".join(f"{a['name']} {_hm(a['min'])}" for a in day.get("apps", [])[:3])
+        if apps:
+            lines.append(apps)
+        txt(c, "\n".join(lines) or "Время считается, пока ты за компьютером", 9, DIM, justify="left",
+            wraplength=S(320)).pack(anchor="w", padx=18, pady=(4, 14))
+
+    def _call_card(self, cs):
+        c = self.call
+        self._clear(c)
+        calls_now = cs.get("calls") or []
+        self.timer = None
+        if not calls_now:
+            self._title(c, "\ue717", "Созвоны")
+            txt(c, "Сейчас созвона нет. Когда начнётся звонок в Zoom, Teams, Телемосте, Discord, Telegram или "
+                   "в браузере, он появится здесь и на телефоне.", 9, DIM, wraplength=S(320), justify="left").pack(
+                anchor="w", padx=18, pady=(0, 14))
+            return
+        call = calls_now[0]
+        self._title(c, "\ue717", call.get("name", "Созвон"))
+        if call.get("title"):
+            txt(c, call["title"], 10, TEXT, wraplength=S(320), justify="left").pack(anchor="w", padx=18)
+        self.timer = txt(c, "", 18, TEXT, F.display)
+        self.timer.pack(anchor="w", padx=18, pady=(4, 6))
+        self.since = call.get("since", time.time())
+        self._tick_call()
+        r = tk.Frame(c, bg=CARD)
+        r.pack(anchor="w", padx=18, pady=(0, 14))
+        muted = cs.get("mic_muted")
+        if muted is not None:
+            WinButton(r, "Включить микрофон" if muted else "Выключить микрофон",
+                      lambda: self._call_act("unmute" if muted else "mute"), primary=bool(muted)).pack(side="left")
+        WinButton(r, "Показать окно", lambda: self._call_act("show", call.get("id", ""))).pack(side="left", padx=(8, 0))
+
+    def _tick_call(self):
+        if getattr(self, "timer", None) is not None and self.timer.winfo_exists():
+            s = max(0, int(time.time() - self.since))
+            self.timer.config(text=f"{s // 3600}:{s // 60 % 60:02d}:{s % 60:02d}" if s >= 3600 else f"{s // 60}:{s % 60:02d}")
+
+    def _call_act(self, action, call_id=""):
+        import calls as calls_mod
+
+        def work():
+            try:
+                calls_mod.act(action, call_id)
+                self.call_state = calls_mod.state()
+            except Exception as e:  # noqa: BLE001
+                agent.log(f"созвон: {e}")
+            self.sig = None
+        threading.Thread(target=work, daemon=True).start()
+
+    def _quick_card(self, cfg):
+        c = self.quick
+        self._clear(c)
+        self._title(c, "\ue945", "Макросы")
+        macros = cfg.get("macros", [])[:8]
+        if not macros:
+            txt(c, "Пока пусто. Кнопки для телефона — на вкладке «Макросы».", 9, DIM).pack(anchor="w", padx=18, pady=(0, 14))
+            return
+        g = tk.Frame(c, bg=CARD)
+        g.pack(anchor="w", padx=18, pady=(0, 14))
+        for i, m in enumerate(macros):
+            WinButton(g, m.get("label") or m.get("id", "?"), lambda m=m: self._run(m)).grid(
+                row=i // 3, column=i % 3, sticky="w", padx=(0, 6), pady=(0, 6))
+
+    def _run(self, m):
+        def work():
+            try:
+                agent.run_macro(m)
+                agent.log(f"макрос «{m.get('label', m.get('id'))}» с главной")
+            except Exception as e:  # noqa: BLE001
+                agent.log(f"макрос «{m.get('label', m.get('id'))}»: ошибка {e}")
+        threading.Thread(target=work, daemon=True).start()
+
+    def _copy(self, text):
+        self.clipboard_clear()
+        self.clipboard_append(text)
+        self.sub.config(text="токен скопирован")
+
+    def _firewall(self):
+        self.app.pages["conn"]._firewall()
+        self.firewall = None
+        self.after(4000, lambda: threading.Thread(target=self._checks, daemon=True).start())
 
 
 # ================================================================ spotify page

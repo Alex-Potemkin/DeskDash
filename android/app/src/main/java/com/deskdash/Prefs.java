@@ -46,9 +46,41 @@ public class Prefs {
     public String pcMacros() { return sp().getString("pc_macros", "[]"); }
     public void setPcMacros(String json) { sp().edit().putString("pc_macros", json).apply(); }
 
+    /** "classic" (columns), "bento" (cards), "focus" (big clock, desks on tap), "dock" (sections on a side rail),
+     *  "ribbon" (the day as a strip). */
+    public String uiStyle() { return sp().getString("ui_style", "classic"); }
+    public void setUiStyle(String id) { sp().edit().putString("ui_style", id).apply(); }
+    public String dockPage() { return sp().getString("dock_page", "main"); }
+    public void setDockPage(String id) { sp().edit().putString("dock_page", id).apply(); }
+
     public boolean nightMode() { return sp().getBoolean("night_mode", true); }
-    public int nightFrom() { return sp().getInt("night_from", 23); }
-    public int nightTo() { return sp().getInt("night_to", 7); }
+    public int nightFrom() { return nightStart() / 60; }
+    public int nightTo() { return nightEnd() / 60; }
+    /** Start and end of the night in minutes after midnight; older versions kept whole hours. */
+    public int nightStart() { return sp().getInt("night_start", sp().getInt("night_from", 23) * 60); }
+    public int nightEnd() { return sp().getInt("night_end", sp().getInt("night_to", 7) * 60); }
+    /** When it is night: "time", "sun" (sunset to sunrise, from the weather) or "light" (the room went dark). */
+    public String nightTrigger() { return sp().getString("night_trigger", "time"); }
+    /** What night looks like: "clock" (only a big dim clock), "desk" (the desk in night colours), "dim" (own theme, quieter). */
+    public String nightLook() { return sp().getString("night_look", "clock"); }
+    /** "red", "amber" or "gray". */
+    public String nightTint() { return sp().getString("night_tint", "red"); }
+    /** Screen brightness at night, 1..40 %. */
+    public int nightBright() { return Math.max(1, Math.min(40, sp().getInt("night_bright", 1))); }
+    /** Dim the screen over the half hour before the night starts. */
+    public boolean nightFade() { return sp().getBoolean("night_fade", true); }
+    /** Room light (lux) below which the "light" trigger turns night on. */
+    public int nightLux() { return sp().getInt("night_lux", 5); }
+
+    /** Weather line under the clock, rain warning in the live strip. */
+    public boolean weatherClock() { return sp().getBoolean("weather_clock", true); }
+    public boolean weatherRain() { return sp().getBoolean("weather_rain", true); }
+
+    /** Smart home reactions: a device for calls, devices to switch off at night, a lamp for the sunrise. */
+    public String autoCall() { return sp().getString("auto_call", ""); }
+    public String autoNight() { return sp().getString("auto_night", ""); }
+    public String autoDawn() { return sp().getString("auto_dawn", ""); }
+    public int dawnMinutes() { return sp().getInt("dawn_min", 20); }
 
     /** Desks as JSON, see Desks. */
     public String desks() { return sp().getString("desks", ""); }
@@ -99,6 +131,13 @@ public class Prefs {
     public int callRemind() { return sp().getInt("call_remind", 5); }
     /** Where "Подключиться" opens a meeting: "pc" or "phone". */
     public String callJoin() { return sp().getString("call_join", "pc"); }
+    /** A short sound when a meeting is about to start. */
+    public boolean callSound() { return sp().getBoolean("call_sound", true); }
+    /** Calls running on this phone (Telegram, WhatsApp, Zoom…), seen through their notifications. */
+    public boolean phoneCalls() { return sp().getBoolean("phone_calls", true); }
+    /** Meeting links joined by hand, newest first: [{"url", "t", "at"}]. */
+    public String callRecent() { return sp().getString("call_recent", "[]"); }
+    public void setCallRecent(String json) { sp().edit().putString("call_recent", json).apply(); }
 
     public String yaClientId() { return sp().getString("ya_client_id", "").trim(); }
     public String yaToken() { return sp().getString("ya_token", "").trim(); }

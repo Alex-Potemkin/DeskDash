@@ -97,7 +97,7 @@ final class Presets {
             case "home":
                 return new JSONArray()
                         .put(desk("Дом",
-                                Desks.column(36, b("clock", 1), b("music", 0)),
+                                Desks.column(36, b("clock", 1), b("weather", 0), b("music", 0)),
                                 Desks.column(64, home("Комнаты", 1))))
                         .put(desk("День",
                                 Desks.column(50, b("clock", 1), b("calls", 1)),
@@ -107,7 +107,7 @@ final class Presets {
             case "bedside":
                 return new JSONArray().put(desk("Спальня",
                         Desks.column(55, b("clock", 2), home("Свет", 1)),
-                        Desks.column(45, b("calendar", 1))));
+                        Desks.column(45, b("weather", 0), b("calendar", 1))));
             default:
                 return Desks.defaults();
         }
@@ -121,7 +121,7 @@ final class Presets {
             prefs.setTheme(p.theme);
             prefs.setClockStyle(p.clock);
         }
-        if ("bedside".equals(p.id)) prefs.raw().edit().putInt("night_from", 22).apply();
+        if ("bedside".equals(p.id)) prefs.raw().edit().putInt("night_start", 22 * 60).apply();
     }
 
     // ---------------------------------------------------------------- first start
@@ -130,22 +130,127 @@ final class Presets {
         return c.getSharedPreferences("deskdash_profiles", Context.MODE_PRIVATE);
     }
 
+    /** After an update that brought new things to set up (looks, weather, night): a short tour, desks untouched. */
+    static boolean needTour(Context c) {
+        return global(c).getBoolean("welcomed", false) && !global(c).getBoolean("welcomed_v2", false);
+    }
+
     /** First start: nothing set up yet. Settings from older versions count as "already set up". */
     static boolean needWelcome(Context c) {
         if (global(c).getBoolean("welcomed", false)) return false;
         SharedPreferences sp = new Prefs(c).raw();
         if (sp.contains("desks") || sp.contains("pc_host") || sp.contains("theme") || sp.contains("ha_url")) {
-            setWelcomed(c);
+            global(c).edit().putBoolean("welcomed", true).apply();
             return false;
         }
         return true;
     }
 
     static void setWelcomed(Context c) {
-        global(c).edit().putBoolean("welcomed", true).apply();
+        global(c).edit().putBoolean("welcomed", true).putBoolean("welcomed_v2", true).apply();
     }
 
-    // ---------------------------------------------------------------- preview
+    // ---------------------------------------------------------------- previews
+
+    /** What a look ("classic", "bento", "focus", "dock", "ribbon") looks like, in a theme. */
+    static final class LookPreview extends View {
+        private final Paint p = new Paint(Paint.ANTI_ALIAS_FLAG);
+        private String look = "classic";
+        private DashTheme th = DashTheme.ALL[0];
+
+        LookPreview(Context c) {
+            super(c);
+            p.setTextAlign(Paint.Align.CENTER);
+        }
+
+        void set(String look, DashTheme theme) {
+            this.look = look;
+            th = theme;
+            invalidate();
+        }
+
+        @Override
+        protected void onDraw(Canvas c) {
+            float d = getResources().getDisplayMetrics().density, w = getWidth(), h = getHeight(), pad = 7 * d, r = 5 * d;
+            p.setColor(th.bg);
+            c.drawRoundRect(0, 0, w, h, 10 * d, 10 * d, p);
+            int card = th.surface, line = th.line;
+            switch (look) {
+                case "bento":
+                    box(c, pad, pad, w * 0.42f, h * 0.55f, card, r);
+                    clock(c, pad + (w * 0.42f - pad) / 2, pad + h * 0.3f, h * 0.2f);
+                    box(c, pad, h * 0.55f + 4 * d, w * 0.42f, h - pad, card, r);
+                    box(c, w * 0.42f + 4 * d, pad, w - pad, h * 0.5f, card, r);
+                    lines(c, w * 0.42f + 10 * d, pad + 7 * d, w - pad - 6 * d, 3, d);
+                    float tw = (w - pad - w * 0.42f - 12 * d) / 3;
+                    for (int i = 0; i < 3; i++) {
+                        float x = w * 0.42f + 4 * d + i * (tw + 4 * d);
+                        box(c, x, h * 0.5f + 4 * d, x + tw, h - pad, i == 0 ? DashTheme.blend(card, th.accent, 0.4f) : card, r);
+                    }
+                    break;
+                case "focus":
+                    clock(c, w / 2, h * 0.5f, h * 0.32f);
+                    p.setColor(card);
+                    c.drawRoundRect(w / 2 - 34 * d, h * 0.68f, w / 2 - 3 * d, h * 0.68f + 9 * d, 5 * d, 5 * d, p);
+                    c.drawRoundRect(w / 2 + 3 * d, h * 0.68f, w / 2 + 34 * d, h * 0.68f + 9 * d, 5 * d, 5 * d, p);
+                    break;
+                case "dock":
+                    box(c, pad, pad, pad + 13 * d, h - pad, card, r);
+                    for (int i = 0; i < 5; i++) {
+                        p.setColor(i == 1 ? th.accent : th.dim);
+                        c.drawCircle(pad + 6.5f * d, pad + 10 * d + i * 11 * d, 2.6f * d, p);
+                    }
+                    float x0 = pad + 18 * d, cw = (w - pad - x0 - 8 * d) / 3, ch = (h - 2 * pad - 4 * d) / 2;
+                    for (int i = 0; i < 6; i++) {
+                        float x = x0 + (i % 3) * (cw + 4 * d), y = pad + (i / 3) * (ch + 4 * d);
+                        box(c, x, y, x + cw, y + ch, i == 0 || i == 4 ? DashTheme.blend(card, th.accent, 0.4f) : card, r);
+                    }
+                    break;
+                case "ribbon": {
+                    clock(c, pad + 18 * d, pad + 13 * d, h * 0.2f);
+                    p.setColor(line);
+                    float top = h * 0.36f, bot = h * 0.66f;
+                    for (int i = 0; i <= 6; i++) c.drawRect(pad + i * (w - 2 * pad) / 6, top, pad + i * (w - 2 * pad) / 6 + d, bot, p);
+                    p.setColor(th.events[0]);
+                    c.drawRoundRect(w * 0.3f, top + 3 * d, w * 0.48f, top + 12 * d, 3 * d, 3 * d, p);
+                    p.setColor(th.events[3]);
+                    c.drawRoundRect(w * 0.55f, top + 14 * d, w * 0.8f, top + 23 * d, 3 * d, 3 * d, p);
+                    p.setColor(th.now);
+                    c.drawRect(w * 0.42f, top - 2 * d, w * 0.42f + 1.5f * d, bot, p);
+                    box(c, pad, h * 0.72f, w * 0.45f, h - pad, card, r);
+                    box(c, w * 0.48f, h * 0.72f, w - pad, h - pad, card, r);
+                    break;
+                }
+                default:
+                    clock(c, w * 0.25f, h * 0.38f, h * 0.24f);
+                    box(c, pad, h * 0.62f, w * 0.48f, h * 0.78f, card, r);
+                    p.setColor(line);
+                    c.drawRect(w * 0.52f, pad, w * 0.52f + d, h - pad, p);
+                    lines(c, w * 0.56f, pad + 3 * d, w - pad, 4, d);
+                    break;
+            }
+        }
+
+        private void box(Canvas c, float l, float t, float r, float b, int color, float rad) {
+            p.setColor(color);
+            c.drawRoundRect(l, t, r, b, rad, rad, p);
+        }
+
+        private void clock(Canvas c, float cx, float cy, float size) {
+            p.setColor(th.text);
+            p.setTextSize(size);
+            c.drawText("12:30", cx, cy + size * 0.35f, p);
+        }
+
+        /** Calendar-like events. */
+        private void lines(Canvas c, float l, float t, float r, int n, float d) {
+            for (int i = 0; i < n; i++) {
+                p.setColor(th.events[i % th.events.length]);
+                float y = t + i * 9 * d;
+                c.drawRoundRect(l, y, l + (r - l) * (i % 2 == 0 ? 0.9f : 0.6f), y + 6 * d, 2 * d, 2 * d, p);
+            }
+        }
+    }
 
     /** Small picture of a preset's first desk in a theme: columns of named blocks. */
     static final class Preview extends View {

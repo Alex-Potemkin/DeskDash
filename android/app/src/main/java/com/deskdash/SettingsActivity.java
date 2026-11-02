@@ -3,6 +3,7 @@ package com.deskdash;
 import android.Manifest;
 import android.app.Activity;
 import android.app.AlertDialog;
+import android.app.TimePickerDialog;
 import android.content.ActivityNotFoundException;
 import android.content.Intent;
 import android.content.SharedPreferences;
@@ -45,15 +46,16 @@ public class SettingsActivity extends Activity {
 
     /** id, title, icon, words to search for. */
     private static final Object[][] PAGES = {
-            {"look", "Вид и часы", R.drawable.ic_palette, "тема цвет часы стиль шрифт секунды 24 формат обложка акцент google цвета событий"},
+            {"look", "Вид и часы", R.drawable.ic_palette, "вид интерфейс плитки фокус док лента колонки тема цвет часы стиль шрифт секунды 24 формат обложка акцент google цвета событий"},
             {"desks", "Столы и готовые варианты", R.drawable.ic_dashboard, "столы блоки колонки варианты пресеты шаблоны рабочий умный дом минимализм"},
-            {"screen", "Экран и ночь", R.drawable.ic_night, "ночь ночной режим яркость выгорание заставка живая строка сверху"},
+            {"screen", "Экран и ночь", R.drawable.ic_night, "ночь ночной режим закат рассвет датчик света темно часы будильник яркость выгорание заставка живая строка сверху"},
+            {"weather", "Погода", R.drawable.ic_weather, "погода город температура дождь снег прогноз ветер"},
             {"calendar", "Календарь", R.drawable.ic_calendar, "календарь google ics ссылки события доступ"},
-            {"calls", "Созвоны", R.drawable.ic_camera, "созвоны звонки zoom meet teams телемост discord telegram напоминание подключиться экран вебка камера"},
+            {"calls", "Созвоны", R.drawable.ic_camera, "созвоны звонки zoom meet teams телемост discord telegram whatsapp телефон ссылка буфер напоминание звук подключиться экран вебка камера"},
             {"music", "Музыка", R.drawable.ic_music, "музыка spotify уведомления плеер"},
             {"stats", "Статистика дня", R.drawable.ic_chart, "статистика день время за компьютером приложения неделя"},
             {"pc", "Компьютер", R.drawable.ic_desktop, "компьютер пк ip токен макросы deskdash.exe найти разбудить wake"},
-            {"home", "Умный дом", R.drawable.ic_home, "умный дом home assistant яндекс хаб raspberry pi свет устройства"},
+            {"home", "Умный дом", R.drawable.ic_home, "умный дом home assistant яндекс хаб raspberry pi свет устройства автоматизации рассвет созвон выключить всё"},
             {"printer", "3D-принтер", R.drawable.ic_printer, "3d принтер bambu lab печать код доступа камера octoprint klipper"},
     };
 
@@ -161,7 +163,7 @@ public class SettingsActivity extends Activity {
         list = cards;
         profileCard();
         group("ЭКРАН");
-        pageCard("look", DashTheme.byId(prefs.theme()).name + " · " + FancyClock.name(prefs.clockStyle()) + " часы");
+        pageCard("look", DashboardView.lookName(prefs.uiStyle()) + " · " + DashTheme.byId(prefs.theme()).name + " · " + FancyClock.name(prefs.clockStyle()) + " часы");
         JSONArray desks = Desks.load(prefs);
         int blocks = 0;
         for (int i = 0; i < desks.length(); i++) {
@@ -172,9 +174,9 @@ public class SettingsActivity extends Activity {
             }
         }
         pageCard("desks", plural(desks.length(), "стол", "стола", "столов") + " · " + plural(blocks, "блок", "блока", "блоков"));
-        pageCard("screen", (prefs.nightMode() ? "ночь с " + prefs.nightFrom() + " до " + prefs.nightTo() : "ночной режим выключен")
-                + (prefs.live() ? " · живая строка" : ""));
+        pageCard("screen", nightSummary() + (prefs.live() ? " · живая строка" : ""));
         group("ДАННЫЕ");
+        pageCard("weather", Weather.configured(prefs) ? Weather.place(prefs) : "город не выбран");
         String cal = prefs.calSource();
         pageCard("calendar", "ics".equals(cal) ? icsCount() : !CalendarRepo.hasPermission(this) ? "нет доступа — нажми, чтобы дать"
                 : "both".equals(cal) ? "аккаунт и " + icsCount() : "Google-аккаунт на телефоне");
@@ -193,8 +195,25 @@ public class SettingsActivity extends Activity {
         List<Bambu.Config> pr = Bambu.load(prefs);
         pageCard("printer", pr.isEmpty() ? "Bambu Lab по сети или из Home Assistant" : pr.get(0).name + (pr.size() > 1 ? " и ещё " + (pr.size() - 1) : ""));
         group("");
-        button("Пройти первую настройку заново", v -> startActivity(new Intent(this, WelcomeActivity.class)));
+        button("Настроить всё по шагам (мастер)", v -> startActivity(new Intent(this, WelcomeActivity.class)
+                .putExtra(WelcomeActivity.EXTRA_TOUR, true)));
+        button("Найти всё в сети: ПК, хаб, Home Assistant, принтер", v -> Setup.findAll(this, prefs, this::recreate));
         list = keep;
+    }
+
+    private String nightSummary() {
+        if (!prefs.nightMode()) return "ночной режим выключен";
+        String when;
+        switch (prefs.nightTrigger()) {
+            case "sun": when = "ночь от заката до рассвета"; break;
+            case "light": when = "ночь, когда в комнате темно"; break;
+            default: when = "ночь " + hm(prefs.nightStart()) + "–" + hm(prefs.nightEnd()); break;
+        }
+        return when + " · " + ("clock".equals(prefs.nightLook()) ? "только часы" : "dim".equals(prefs.nightLook()) ? "тихий стол" : "ночной стол");
+    }
+
+    private static String hm(int minutes) {
+        return String.format(Locale.ROOT, "%d:%02d", minutes / 60 % 24, minutes % 60);
     }
 
     private String icsCount() {
@@ -343,6 +362,7 @@ public class SettingsActivity extends Activity {
             case "look": look(); break;
             case "desks": desks(); break;
             case "screen": screen(); break;
+            case "weather": weather(); break;
             case "calendar": calendar(); break;
             case "calls": calls(); break;
             case "music": music(); break;
@@ -355,11 +375,36 @@ public class SettingsActivity extends Activity {
     }
 
     private void look() {
+        section("Вид экрана");
+        LinearLayout looks = new LinearLayout(this);
+        for (String[] l : DashboardView.LOOKS) {
+            boolean sel = l[0].equals(prefs.uiStyle());
+            LinearLayout card = new LinearLayout(this);
+            card.setOrientation(LinearLayout.VERTICAL);
+            card.setPadding(px(6), px(6), px(6), px(8));
+            GradientDrawable bg = round(SURFACE, 14);
+            bg.setStroke(px(sel ? 2 : 1), sel ? ACCENT : LINE);
+            card.setBackground(bg);
+            Presets.LookPreview pv = new Presets.LookPreview(this);
+            pv.set(l[0], DashTheme.byId(prefs.theme()));
+            card.addView(pv, new LinearLayout.LayoutParams(px(150), px(84)));
+            TextView n = text(l[1], 13, sel ? ACCENT : TEXT);
+            n.setGravity(Gravity.CENTER);
+            card.addView(n, lpm(6, 0));
+            card.setOnClickListener(v -> {
+                prefs.setUiStyle(l[0]);
+                recreate();
+            });
+            looks.addView(card, chipLp());
+        }
+        add(scroll(looks), 4, 4);
+        note(lookAbout(prefs.uiStyle()));
+
         section("Тема");
         LinearLayout row = new LinearLayout(this);
         JSONObject desk = Desks.load(prefs).optJSONObject(Math.max(0, Math.min(prefs.deskIndex(), Desks.load(prefs).length() - 1)));
         for (DashTheme t : DashTheme.ALL) {
-            if (t.id.equals("night")) continue;
+            if (t.isNight()) continue;
             boolean sel = t.id.equals(prefs.theme());
             LinearLayout card = new LinearLayout(this);
             card.setOrientation(LinearLayout.VERTICAL);
@@ -394,6 +439,18 @@ public class SettingsActivity extends Activity {
         section("Цвета");
         toggle("google_colors", "Цвета событий как в Google Календаре (выкл. — палитра темы)", true);
         toggle("art_accent", "Акцент из обложки трека", true);
+    }
+
+    static String lookAbout(String id) {
+        switch (id) {
+            case "bento": return "Плитки: каждый блок на своей карточке, столы те же, что в «Столах и блоках».";
+            case "focus": return "Фокус: большие часы, погода и музыка. Тап — столы на минуту, потом снова часы.";
+            case "dock": return "Док: слева разделы (Стол, Дом, Календарь, Созвоны, Погода, Музыка, День), справа один раздел целиком. "
+                    + "«Дом» показывает все устройства по комнатам.";
+            case "ribbon": return "Лента дня: часы и погода сверху, ближайшие часы полосой с событиями и прогнозом, "
+                    + "внизу музыка и избранные плитки умного дома.";
+            default: return "Колонки: столы из «Столов и блоков», как раньше.";
+        }
     }
 
     private void desks() {
@@ -455,19 +512,118 @@ public class SettingsActivity extends Activity {
         note("Свайп вверх/вниз у правого края — громкость, у левого — яркость.");
 
         section("Ночь");
-        toggle("night_mode", "Ночной режим: тёмно-красная тема и минимальная яркость", true);
-        LinearLayout row = new LinearLayout(this);
-        row.setGravity(Gravity.CENTER_VERTICAL);
-        row.addView(text("с ", 15, TEXT));
-        row.addView(intField("night_from", "23"), new LinearLayout.LayoutParams(px(70), -2));
-        row.addView(text("  до ", 15, TEXT));
-        row.addView(intField("night_to", "7"), new LinearLayout.LayoutParams(px(70), -2));
-        row.addView(text("  часов", 15, TEXT));
-        add(row, 2, 4);
+        toggle("night_mode", "Ночной режим", true);
+        label("Когда начинается");
+        chips("night_trigger", "time", new String[][]{{"time", "По часам"}, {"sun", "Закат — рассвет"}, {"light", "Темно в комнате"}}, true);
+        String trig = prefs.nightTrigger();
+        if ("time".equals(trig)) {
+            LinearLayout row = new LinearLayout(this);
+            row.setGravity(Gravity.CENTER_VERTICAL);
+            row.addView(text("с ", 15, TEXT));
+            row.addView(chip(hm(prefs.nightStart()), false, v -> pickTime("night_start", prefs.nightStart())), chipLp());
+            row.addView(text("до ", 15, TEXT));
+            row.addView(chip(hm(prefs.nightEnd()), false, v -> pickTime("night_end", prefs.nightEnd())), chipLp());
+            add(row, 4, 4);
+        } else if ("sun".equals(trig)) {
+            Weather w = Weather.cached(prefs);
+            Weather.Day d = w == null ? null : w.today();
+            if (!Weather.configured(prefs)) note("Время заката берётся из погоды: выбери город в разделе «Погода». Пока его нет — ночь по часам.");
+            else if (d != null && d.sunset > 0) note("Сегодня ночь с " + Weather.hour(d.sunset + 30 * 60_000L) + " (полчаса после заката) до рассвета в " + Weather.hour(d.sunrise) + ".");
+            else note("Время заката появится, когда загрузится погода.");
+        } else {
+            note("Датчик света телефона: темно 45 секунд — ночь, светло 8 секунд — день. Если датчика нет, ночь по часам.");
+            LinearLayout row = new LinearLayout(this);
+            int cur = prefs.nightLux();
+            String[][] lux = {{"2", "Совсем темно"}, {"5", "Темно"}, {"15", "Полумрак"}, {"40", "Ночник"}};
+            for (String[] l : lux) {
+                int v0 = Integer.parseInt(l[0]);
+                row.addView(chip(l[1], v0 == cur, v -> {
+                    sp.edit().putInt("night_lux", v0).apply();
+                    recreate();
+                }), chipLp());
+            }
+            add(scroll(row), 4, 4);
+        }
+        label("Как выглядит");
+        chips("night_look", "clock", new String[][]{{"clock", "Только часы"}, {"desk", "Стол в ночных цветах"}, {"dim", "Свой стол, тише"}});
+        note("«Только часы»: большие тусклые часы, будильник и погода на утро. Тап — стол на 30 секунд.");
+        label("Цвет ночью");
+        chips("night_tint", "red", new String[][]{{"red", "Красный"}, {"amber", "Янтарный"}, {"gray", "Серый"}});
+        label("Яркость ночью");
+        LinearLayout br = new LinearLayout(this);
+        int nb = prefs.nightBright();
+        for (int v0 : new int[]{1, 3, 5, 10, 20}) {
+            br.addView(chip(v0 + " %", v0 == nb, v -> {
+                sp.edit().putInt("night_bright", v0).apply();
+                recreate();
+            }), chipLp());
+        }
+        add(scroll(br), 4, 4);
+        toggle("night_fade", "Плавно гасить экран за полчаса до ночи", true);
+        note("Ночью свайп у левого края меняет ночную яркость, живая строка показывает только звонки и тревоги. "
+                + "Выключить свет на ночь и «рассвет» лампой — в «Умный дом» → «Автоматизации».");
 
         section("Заставка");
         button("Открыть настройки заставки", v -> open(new Intent(Settings.ACTION_DREAM_SETTINGS)));
         note("Выбери DeskDash и «Во время зарядки»: дашборд будет включаться сам, когда телефон на подставке.");
+    }
+
+    private void weather() {
+        section("Город");
+        note(Weather.configured(prefs) ? "Сейчас: " + Weather.place(prefs) : "Город не выбран.");
+        primary("Определить по сети", v -> {
+            Toast.makeText(this, "Определяю…", Toast.LENGTH_SHORT).show();
+            new Thread(() -> {
+                try {
+                    String[] r = Weather.locate();
+                    Weather.setPlace(prefs, r[0], Double.parseDouble(r[1]), Double.parseDouble(r[2]));
+                    runOnUiThread(() -> {
+                        Toast.makeText(this, "Город: " + r[0], Toast.LENGTH_SHORT).show();
+                        recreate();
+                    });
+                } catch (Exception e) {
+                    runOnUiThread(() -> Toast.makeText(this, "Не вышло: " + SmartHome.msg(e), Toast.LENGTH_LONG).show());
+                }
+            }).start();
+        });
+        button("Найти город по названию", v -> searchCity(this, prefs, this::recreate));
+        note("Прогноз Open-Meteo: бесплатно, без ключей и регистрации. Город по сети определяется по адресу подключения, "
+                + "без доступа к геолокации.");
+        section("На экране");
+        toggle("weather_clock", "Строка погоды под часами", true);
+        toggle("weather_rain", "Предупреждать о дожде и снеге в живой строке", true);
+        note("Блок «Погода» (сейчас, по часам, на 3 дня) добавляется в «Столы и блоки». Тап по нему обновляет прогноз.");
+    }
+
+    /** Search a place by name and save the picked one; shared with the first-start wizard. */
+    static void searchCity(Activity a, Prefs p, Runnable done) {
+        Setup.ask(a, "Город", "", false, q -> new Thread(() -> {
+            try {
+                List<String[]> found = Weather.search(q);
+                a.runOnUiThread(() -> {
+                    if (found.isEmpty()) {
+                        Toast.makeText(a, "Ничего не нашлось", Toast.LENGTH_SHORT).show();
+                        return;
+                    }
+                    String[] names = new String[found.size()];
+                    for (int i = 0; i < names.length; i++) names[i] = found.get(i)[0];
+                    new AlertDialog.Builder(a).setTitle("Выбери").setItems(names, (d, i) -> {
+                        String[] r = found.get(i);
+                        Weather.setPlace(p, r[0].split(",")[0], Double.parseDouble(r[1]), Double.parseDouble(r[2]));
+                        if (done != null) done.run();
+                    }).show();
+                });
+            } catch (Exception e) {
+                a.runOnUiThread(() -> Toast.makeText(a, "Поиск: " + SmartHome.msg(e), Toast.LENGTH_LONG).show());
+            }
+        }).start());
+    }
+
+    private void pickTime(String key, int minutes) {
+        new TimePickerDialog(this, (tp, h, m) -> {
+            sp.edit().putInt(key, h * 60 + m).apply();
+            recreate();
+        }, minutes / 60 % 24, minutes % 60, true).show();
     }
 
     private void calendar() {
@@ -486,6 +642,16 @@ public class SettingsActivity extends Activity {
     }
 
     private void calls() {
+        section("Без компьютера и календаря");
+        toggle("phone_calls", "Звонки на этом телефоне: Telegram, WhatsApp, Zoom, Meet, обычные", true);
+        if (!MusicWatcher.hasAccess(this)) {
+            primary("Дать доступ к уведомлениям", v -> open(new Intent(Settings.ACTION_NOTIFICATION_LISTENER_SETTINGS)));
+        }
+        note("Звонок на телефоне виден по уведомлению приложения: кто, сколько идёт, кнопки микрофона, громкой связи, "
+                + "«Завершить» и «Ответить». Нужен доступ к уведомлениям (тот же, что для музыки).");
+        note("«+ Звонок по ссылке» в блоке «Созвоны»: вставь ссылку или скопируй её где угодно — она сама появится в блоке. "
+                + "Там же недавние ссылки и «Новая встреча» в Телемосте, Meet или Jitsi.");
+        toggle("call_sound", "Звук уведомления, когда встреча вот-вот начнётся", true);
         section("Откуда берутся");
         note("Встречи — из календаря: в событии ищется ссылка Zoom, Google Meet, Teams, Телемоста, Jitsi, VK Звонков, "
                 + "SberJazz, Контур.Толка, Webex, Skype, Discord, Slack и других. Идущий звонок на ПК DeskDash.exe "
@@ -610,7 +776,101 @@ public class SettingsActivity extends Activity {
 
         section("На экране");
         note("Устройства на экран добавляются в «Столы и блоки» → блок «Умный дом» → «Устройства…». "
-                + "Тап по плитке включает/выключает, долгий тап — яркость, цвет, температура, пауза печати.");
+                + "Тап по плитке включает/выключает, долгий тап — яркость, цвет, температура, пауза печати. "
+                + "В заголовке блока — температура дома, сколько света горит и «Выключить всё».");
+
+        section("Автоматизации");
+        if (!SmartHome.configured(prefs)) {
+            note("Сначала подключи хаб, Home Assistant или Яндекс.");
+            return;
+        }
+        autoRow("Во время созвона включать", "auto_call", false, d -> d.kind == HomeDevice.LIGHT || d.kind == HomeDevice.SWITCH
+                || d.kind == HomeDevice.SCENE);
+        note("Лампа у стола или сценарий: включается, когда начался звонок на телефоне или ПК, и гаснет после.");
+        autoRow("Когда наступает ночь, выключать", "auto_night", true, d -> d.canToggle && d.kind != HomeDevice.LOCK
+                || d.kind == HomeDevice.SCENE);
+        autoRow("Рассвет: лампа плавно загорается к концу ночи", "auto_dawn", false, d -> d.kind == HomeDevice.LIGHT);
+        LinearLayout dr = new LinearLayout(this);
+        int dm = prefs.dawnMinutes();
+        for (int v0 : new int[]{10, 20, 30, 45}) {
+            dr.addView(chip("за " + v0 + " мин", v0 == dm, v -> {
+                sp.edit().putInt("dawn_min", v0).apply();
+                recreate();
+            }), chipLp());
+        }
+        add(scroll(dr), 4, 4);
+        note("Рассвет заканчивается вместе с ночью (Экран и ночь → «до»). Автоматизации работают, пока дашборд открыт.");
+    }
+
+    private interface DeviceFilter {
+        boolean ok(HomeDevice d);
+    }
+
+    /** "Title: what is chosen" with a picker of the devices that fit. */
+    private void autoRow(String title, String key, boolean multi, DeviceFilter filter) {
+        String names = sp.getString(key + "_names", "");
+        LinearLayout r = new LinearLayout(this);
+        r.setGravity(Gravity.CENTER_VERTICAL);
+        r.setPadding(px(14), px(10), px(10), px(10));
+        r.setBackground(round(SURFACE, 14));
+        LinearLayout t = new LinearLayout(this);
+        t.setOrientation(LinearLayout.VERTICAL);
+        t.addView(text(title, 15, TEXT));
+        t.addView(text(sp.getString(key, "").isEmpty() ? "не выбрано" : names, 12, sp.getString(key, "").isEmpty() ? DIM : ACCENT));
+        r.addView(t, new LinearLayout.LayoutParams(0, -2, 1));
+        r.addView(chip("Выбрать", false, v -> pickAuto(title, key, multi, filter)));
+        add(r, 6, 4);
+    }
+
+    private void pickAuto(String title, String key, boolean multi, DeviceFilter filter) {
+        saveAll();
+        Toast.makeText(this, "Загружаю устройства…", Toast.LENGTH_SHORT).show();
+        new Thread(() -> {
+            StringBuilder err = new StringBuilder();
+            List<HomeDevice> all = new ArrayList<>();
+            for (HomeDevice d : SmartHome.listAll(prefs, err)) if (filter.ok(d)) all.add(d);
+            runOnUiThread(() -> {
+                if (all.isEmpty()) {
+                    Toast.makeText(this, err.length() > 0 ? err.toString() : "Подходящих устройств нет", Toast.LENGTH_LONG).show();
+                    return;
+                }
+                String[] labels = new String[all.size() + (multi ? 0 : 1)];
+                int off = multi ? 0 : 1;
+                if (!multi) labels[0] = "— не нужно —";
+                for (int i = 0; i < all.size(); i++) {
+                    HomeDevice d = all.get(i);
+                    labels[i + off] = d.name + (d.room.isEmpty() ? "" : " · " + d.room);
+                }
+                List<String> cur = java.util.Arrays.asList(sp.getString(key, "").split(","));
+                AlertDialog.Builder b = new AlertDialog.Builder(this).setTitle(title);
+                if (multi) {
+                    boolean[] checked = new boolean[all.size()];
+                    for (int i = 0; i < all.size(); i++) checked[i] = cur.contains(all.get(i).id);
+                    b.setMultiChoiceItems(labels, checked, (d, i, on) -> checked[i] = on)
+                            .setPositiveButton("Сохранить", (d, w) -> {
+                                StringBuilder ids = new StringBuilder(), ns = new StringBuilder();
+                                for (int i = 0; i < all.size(); i++) {
+                                    if (!checked[i]) continue;
+                                    ids.append(ids.length() > 0 ? "," : "").append(all.get(i).id);
+                                    ns.append(ns.length() > 0 ? ", " : "").append(all.get(i).name);
+                                }
+                                sp.edit().putString(key, ids.toString()).putString(key + "_names", ns.toString()).apply();
+                                recreate();
+                            })
+                            .setNegativeButton("Отмена", null);
+                } else {
+                    int sel = 0;
+                    for (int i = 0; i < all.size(); i++) if (cur.contains(all.get(i).id)) sel = i + 1;
+                    b.setSingleChoiceItems(labels, sel, (d, i) -> {
+                        if (i == 0) sp.edit().remove(key).remove(key + "_names").apply();
+                        else sp.edit().putString(key, all.get(i - 1).id).putString(key + "_names", all.get(i - 1).name).apply();
+                        d.dismiss();
+                        recreate();
+                    });
+                }
+                b.show();
+            });
+        }).start();
     }
 
     private void printer() {
@@ -742,6 +1002,18 @@ public class SettingsActivity extends Activity {
         s.setChecked(sp.getBoolean(key, def));
         s.setOnCheckedChangeListener((b, on) -> sp.edit().putBoolean(key, on).apply());
         add(s, 8, 8);
+    }
+
+    private void chips(String key, String def, String[][] options, boolean reload) {
+        LinearLayout row = new LinearLayout(this);
+        String cur = sp.getString(key, def);
+        for (String[] o : options) {
+            row.addView(chip(o[1], o[0].equals(cur), v -> {
+                sp.edit().putString(key, o[0]).apply();
+                if (reload) recreate();
+            }), chipLp());
+        }
+        add(scroll(row), 4, 4);
     }
 
     /** One-of choice as a row of chips. */

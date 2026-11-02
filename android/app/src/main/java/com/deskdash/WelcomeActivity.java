@@ -20,17 +20,27 @@ import android.widget.LinearLayout;
 import android.widget.ScrollView;
 import android.widget.TextView;
 
+import java.util.ArrayList;
+import java.util.List;
+
 /**
- * First start: pick a ready-made dashboard (with a live preview), a look (the same preview in every
- * theme) and connect what's around — PC, hub, calendar, music, 3D printer. Three short steps, each
- * can be skipped; all of it can be changed later in the settings.
+ * First start: pick a ready-made dashboard (with a live preview), a look (five ways to lay the screen
+ * out, the theme and the clock), the weather and the night, then connect what's around — "find
+ * everything" looks for the PC, the hub, Home Assistant and printers at once. Every step can be skipped;
+ * all of it can be changed later in the settings. After an update, or from the settings, the same
+ * wizard runs as a tour without the first step, so the desks stay as they are.
  */
 public class WelcomeActivity extends Activity {
+    static final String EXTRA_TOUR = "tour";
+
     private Prefs prefs;
     private float dp;
     private int step;
+    private boolean tour, located;
+    private String locateMsg = "";
+    private final List<String> steps = new ArrayList<>();
     private Presets.Preset preset = Presets.ALL[0];
-    private String theme = preset.theme, clock = preset.clock;
+    private String theme = preset.theme, clock = preset.clock, style = "classic";
     private DashTheme th;
     private FrameLayout root;
 
@@ -39,6 +49,16 @@ public class WelcomeActivity extends Activity {
         super.onCreate(state);
         prefs = new Prefs(this);
         dp = getResources().getDisplayMetrics().density;
+        tour = getIntent().getBooleanExtra(EXTRA_TOUR, false);
+        if (!tour) steps.add("preset");
+        steps.add("look");
+        steps.add("night");
+        steps.add("connect");
+        if (tour) {
+            theme = prefs.theme();
+            clock = prefs.clockStyle();
+            style = prefs.uiStyle();
+        }
         root = new FrameLayout(this);
         setContentView(root);
         render();
@@ -47,7 +67,7 @@ public class WelcomeActivity extends Activity {
     @Override
     protected void onResume() {
         super.onResume();
-        if (step == 2) render(); // back from a permission screen: show the new state
+        if (step > 0) render(); // back from a permission or sign-in screen: show the new state
     }
 
     @Override
@@ -60,6 +80,8 @@ public class WelcomeActivity extends Activity {
         if (step > 0) {
             step--;
             render();
+        } else if (tour) {
+            finishWelcome(); // the tour is offered once: closing it keeps everything as it is
         } else {
             super.onBackPressed();
         }
@@ -73,6 +95,7 @@ public class WelcomeActivity extends Activity {
         root.setBackgroundColor(th.bg);
         getWindow().setStatusBarColor(th.bg);
         getWindow().setNavigationBarColor(th.bg);
+        boolean last = step == steps.size() - 1;
 
         LinearLayout page = new LinearLayout(this);
         page.setOrientation(LinearLayout.VERTICAL);
@@ -80,7 +103,7 @@ public class WelcomeActivity extends Activity {
 
         LinearLayout head = new LinearLayout(this);
         head.setGravity(Gravity.CENTER_VERTICAL);
-        for (int i = 0; i < 3; i++) {
+        for (int i = 0; i < steps.size(); i++) {
             View d = new View(this);
             d.setBackground(round(i == step ? th.accent : th.line, 4));
             LinearLayout.LayoutParams l = new LinearLayout.LayoutParams(px(i == step ? 22 : 8), px(8));
@@ -90,7 +113,7 @@ public class WelcomeActivity extends Activity {
         View sp = new View(this);
         head.addView(sp, new LinearLayout.LayoutParams(0, 1, 1));
         TextView skip = text(th.dim, 14);
-        skip.setText(step == 2 ? "" : "Пропустить");
+        skip.setText(last ? "" : tour ? "Закрыть" : "Пропустить");
         skip.setPadding(px(10), px(6), 0, px(6));
         skip.setOnClickListener(v -> finishWelcome());
         head.addView(skip);
@@ -110,20 +133,25 @@ public class WelcomeActivity extends Activity {
         sv.addView(body);
         page.addView(sv, new LinearLayout.LayoutParams(-1, 0, 1));
 
-        switch (step) {
-            case 0:
+        switch (steps.get(step)) {
+            case "preset":
                 title.setText("Привет! Каким будет стол?");
                 sub.setText("Выбери готовый вариант — потом любой блок можно передвинуть, убрать или добавить");
                 presets(body);
                 break;
-            case 1:
-                title.setText("Как он будет выглядеть");
-                sub.setText("Тема и часы. На столе тема меняется двойным тапом по часам, стиль часов — свайпом по ним");
+            case "look":
+                title.setText(tour ? "Новое: вид экрана, погода, ночь" : "Как он будет выглядеть");
+                sub.setText("Вид экрана, тема и часы. На столе тема меняется двойным тапом по часам, стиль часов — свайпом по ним");
                 looks(body);
+                break;
+            case "night":
+                title.setText("Погода и ночь");
+                sub.setText("Погода под часами и отдельным блоком. Ночью экран гаснет до тусклых часов, тап по ним показывает стол");
+                weatherAndNight(body);
                 break;
             default:
                 title.setText("Что подключить");
-                sub.setText("Всё необязательно и есть в Настройках. Компьютер нужен для созвонов, статистики и экрана ПК на телефоне");
+                sub.setText("Всё необязательно и есть в Настройках. Созвоны работают и без компьютера: из календаря, по ссылке и на телефоне");
                 connections(body);
                 break;
         }
@@ -142,12 +170,12 @@ public class WelcomeActivity extends Activity {
         }
         nav.addView(new View(this), new LinearLayout.LayoutParams(0, 1, 1));
         TextView next = text(DashTheme.onColor(th.accent), 16);
-        next.setText(step == 2 ? "Готово" : "Дальше");
+        next.setText(last ? "Готово" : "Дальше");
         next.setTypeface(Typeface.create("sans-serif-medium", Typeface.NORMAL));
         next.setPadding(px(28), px(12), px(28), px(12));
         next.setBackground(round(th.accent, 24));
         next.setOnClickListener(v -> {
-            if (step == 2) {
+            if (last) {
                 finishWelcome();
             } else {
                 step++;
@@ -203,9 +231,40 @@ public class WelcomeActivity extends Activity {
     }
 
     private void looks(LinearLayout body) {
+        body.addView(caption("ВИД ЭКРАНА"), lp(0, 6));
+        LinearLayout styles = new LinearLayout(this);
+        for (String[] l : DashboardView.LOOKS) {
+            boolean sel = l[0].equals(style);
+            LinearLayout card = new LinearLayout(this);
+            card.setOrientation(LinearLayout.VERTICAL);
+            card.setPadding(px(8), px(8), px(8), px(10));
+            GradientDrawable bg = round(sel ? DashTheme.blend(th.surface, th.accent, 0.18f) : th.surface, 16);
+            bg.setStroke(px(sel ? 2 : 1), sel ? th.accent : th.line);
+            card.setBackground(bg);
+            Presets.LookPreview pv = new Presets.LookPreview(this);
+            pv.set(l[0], th);
+            card.addView(pv, new LinearLayout.LayoutParams(px(150), px(84)));
+            TextView n = text(sel ? th.accent : th.text, 14);
+            n.setText(l[1]);
+            n.setGravity(Gravity.CENTER);
+            card.addView(n, lp(6, 0));
+            card.setOnClickListener(v -> {
+                style = l[0];
+                render();
+            });
+            LinearLayout.LayoutParams ll = new LinearLayout.LayoutParams(-2, -2);
+            ll.rightMargin = px(10);
+            styles.addView(card, ll);
+        }
+        body.addView(scroll(styles));
+        TextView about = text(th.dim, 12);
+        about.setText(SettingsActivity.lookAbout(style));
+        body.addView(about, lp(6, 0));
+
+        body.addView(caption("ТЕМА"), lp(14, 6));
         LinearLayout row = new LinearLayout(this);
         for (DashTheme t : DashTheme.ALL) {
-            if (t.id.equals("night")) continue;
+            if (t.isNight()) continue;
             boolean sel = t.id.equals(theme);
             LinearLayout card = new LinearLayout(this);
             card.setOrientation(LinearLayout.VERTICAL);
@@ -213,9 +272,9 @@ public class WelcomeActivity extends Activity {
             GradientDrawable bg = round(t.surface, 16);
             bg.setStroke(px(sel ? 2 : 1), sel ? th.accent : th.line);
             card.setBackground(bg);
-            Presets.Preview pv = new Presets.Preview(this);
-            pv.set(preset, t);
-            card.addView(pv, new LinearLayout.LayoutParams(px(150), px(72)));
+            Presets.LookPreview pv = new Presets.LookPreview(this);
+            pv.set(style, t);
+            card.addView(pv, new LinearLayout.LayoutParams(px(120), px(64)));
             TextView n = text(t.text, 14);
             n.setText(t.name);
             n.setGravity(Gravity.CENTER);
@@ -230,49 +289,88 @@ public class WelcomeActivity extends Activity {
         }
         body.addView(scroll(row));
 
-        TextView cap = text(th.dim, 13);
-        cap.setText("ЧАСЫ");
-        cap.setLetterSpacing(0.14f);
-        body.addView(cap, lp(12, 6));
-        LinearLayout clocks = new LinearLayout(this);
-        for (String[] c : FancyClock.STYLES) {
-            boolean sel = c[0].equals(clock);
-            TextView chip = text(sel ? DashTheme.onColor(th.accent) : th.text, 14);
-            chip.setText(c[1]);
-            chip.setPadding(px(16), px(9), px(16), px(9));
-            chip.setBackground(round(sel ? th.accent : th.surface, 18));
-            chip.setOnClickListener(v -> {
-                clock = c[0];
-                render();
-            });
-            LinearLayout.LayoutParams l = new LinearLayout.LayoutParams(-2, -2);
-            l.rightMargin = px(8);
-            clocks.addView(chip, l);
+        body.addView(caption("ЧАСЫ"), lp(12, 6));
+        List<String[]> cs = new ArrayList<>();
+        for (String[] c : FancyClock.STYLES) cs.add(c);
+        body.addView(chips(cs.toArray(new String[0][]), clock, id -> clock = id));
+    }
+
+    private void weatherAndNight(LinearLayout body) {
+        if (!Weather.configured(prefs) && !located) {
+            located = true;
+            locateMsg = "Определяю город…";
+            new Thread(() -> {
+                try {
+                    String[] r = Weather.locate();
+                    Weather.setPlace(prefs, r[0], Double.parseDouble(r[1]), Double.parseDouble(r[2]));
+                    locateMsg = "";
+                } catch (Exception e) {
+                    locateMsg = "Город не определился: выбери его сам";
+                }
+                runOnUiThread(this::render);
+            }).start();
         }
-        body.addView(scroll(clocks));
+        boolean wx = Weather.configured(prefs);
+        connRow(body, R.drawable.ic_weather, "Погода", wx ? Weather.place(prefs) + " · Open-Meteo, без ключей" : locateMsg,
+                wx ? "Другой город" : "Выбрать", v -> SettingsActivity.searchCity(this, prefs, this::render));
+
+        body.addView(caption("КОГДА НОЧЬ"), lp(14, 6));
+        String trig = prefs.nightMode() ? prefs.nightTrigger() : "off";
+        body.addView(chips(new String[][]{{"time", "По часам, 23–7"}, {"sun", "От заката до рассвета"},
+                {"light", "Когда в комнате темно"}, {"off", "Не нужна"}}, trig, id -> {
+            if ("off".equals(id)) {
+                prefs.raw().edit().putBoolean("night_mode", false).apply();
+            } else {
+                prefs.raw().edit().putBoolean("night_mode", true).putString("night_trigger", id).apply();
+            }
+        }));
+        if (prefs.nightMode()) {
+            body.addView(caption("КАК ВЫГЛЯДИТ"), lp(12, 6));
+            body.addView(chips(new String[][]{{"clock", "Только часы"}, {"desk", "Стол в ночных цветах"}, {"dim", "Свой стол, тише"}},
+                    prefs.nightLook(), id -> prefs.raw().edit().putString("night_look", id).apply()));
+            body.addView(caption("ЦВЕТ"), lp(12, 6));
+            body.addView(chips(new String[][]{{"red", "Красный"}, {"amber", "Янтарный"}, {"gray", "Серый"}},
+                    prefs.nightTint(), id -> prefs.raw().edit().putString("night_tint", id).apply()));
+            TextView n = text(th.dim, 12);
+            n.setText("Время, яркость, плавное затемнение и выключение света на ночь — в Настройках → «Экран и ночь»");
+            body.addView(n, lp(8, 0));
+        }
     }
 
     private void connections(LinearLayout body) {
+        TextView all = text(DashTheme.onColor(th.accent), 15);
+        all.setText("Найти всё в сети: компьютер, хаб, Home Assistant, принтер");
+        all.setTypeface(Typeface.create("sans-serif-medium", Typeface.NORMAL));
+        all.setGravity(Gravity.CENTER);
+        all.setPadding(px(16), px(12), px(16), px(12));
+        all.setBackground(round(th.accent, 18));
+        all.setOnClickListener(v -> Setup.findAll(this, prefs, this::render));
+        body.addView(all, lp(0, 10));
+
         boolean pcSet = !prefs.pcHost().isEmpty(), hubSet = HubClient.configured(prefs);
         connRow(body, R.drawable.ic_desktop, "Компьютер", pcSet ? "Подключён: " + prefs.pcHost()
-                        : "Запусти DeskDash.exe на ПК: макросы, созвоны, статистика, экран на телефоне",
+                        : "Запусти DeskDash.exe на ПК: макросы, звонки на ПК, статистика, экран на телефоне",
                 pcSet ? "Заново" : "Найти", v -> Setup.findPc(this, prefs, this::render));
         connRow(body, R.drawable.ic_calendar, "Календарь", CalendarRepo.hasPermission(this) ? "Доступ есть" : "Встречи, напоминания и ссылки на созвоны",
                 CalendarRepo.hasPermission(this) ? "" : "Разрешить",
                 v -> requestPermissions(new String[]{Manifest.permission.READ_CALENDAR}, 1));
-        connRow(body, R.drawable.ic_music, "Музыка", MusicWatcher.hasAccess(this) ? "Доступ есть" : "Что играет в Spotify и других плеерах",
+        connRow(body, R.drawable.ic_music, "Музыка и звонки на телефоне", MusicWatcher.hasAccess(this) ? "Доступ есть"
+                        : "Что играет, и звонки Telegram, WhatsApp, Zoom с кнопками на дашборде",
                 MusicWatcher.hasAccess(this) ? "" : "Разрешить",
                 v -> open(new Intent(Settings.ACTION_NOTIFICATION_LISTENER_SETTINGS)));
         connRow(body, R.drawable.ic_home, "Хаб Raspberry Pi", hubSet ? "Подключён: " + prefs.hubUrl()
                         : "Умный дом и ПК через хаб, если он есть",
                 hubSet ? "Заново" : "Найти", v -> Setup.findHub(this, prefs, this::render));
+        boolean ha = HomeAssistant.configured(prefs);
+        connRow(body, R.drawable.ic_bulb, "Home Assistant", ha ? "Подключён: " + prefs.haUrl() : "Найдём его в сети и откроем вход",
+                ha ? "Заново" : "Найти", v -> Setup.findHa(this, prefs));
+        boolean ya = YandexHome.configured(prefs);
+        connRow(body, R.drawable.ic_speaker, "Яндекс Умный дом", ya ? "Вход выполнен" : "Свет, розетки и сценарии из приложения «Дом с Алисой»",
+                ya ? "" : "Настроить", v -> startActivity(new Intent(this, SettingsActivity.class).putExtra(SettingsActivity.EXTRA_PAGE, "home")));
         int printers = Bambu.load(prefs).size();
         connRow(body, R.drawable.ic_printer, "3D-принтер Bambu Lab", printers > 0 ? "Добавлено: " + printers
                         : "Прогресс печати, камера и пауза прямо с дашборда",
                 printers > 0 ? "Ещё" : "Найти", v -> Setup.findPrinter(this, prefs, this::render));
-        TextView n = text(th.dim, 13);
-        n.setText("Home Assistant и Яндекс подключаются в Настройках → «Умный дом»");
-        body.addView(n, lp(8, 0));
     }
 
     private void connRow(LinearLayout body, int icon, String title, String sub, String action, View.OnClickListener l) {
@@ -311,14 +409,46 @@ public class WelcomeActivity extends Activity {
     }
 
     private void finishWelcome() {
-        Presets.apply(prefs, preset, false);
+        if (!tour) Presets.apply(prefs, preset, false);
         prefs.setTheme(theme);
         prefs.setClockStyle(clock);
+        prefs.setUiStyle(style);
         Presets.setWelcomed(this);
         finish();
     }
 
     // ---------------------------------------------------------------- helpers
+
+    private interface Picked {
+        void on(String id);
+    }
+
+    /** One-of choice: {id, label} chips; picking one re-renders the step. */
+    private View chips(String[][] options, String cur, Picked p) {
+        LinearLayout row = new LinearLayout(this);
+        for (String[] o : options) {
+            boolean sel = o[0].equals(cur);
+            TextView chip = text(sel ? DashTheme.onColor(th.accent) : th.text, 14);
+            chip.setText(o[1]);
+            chip.setPadding(px(16), px(9), px(16), px(9));
+            chip.setBackground(round(sel ? th.accent : th.surface, 18));
+            chip.setOnClickListener(v -> {
+                p.on(o[0]);
+                render();
+            });
+            LinearLayout.LayoutParams l = new LinearLayout.LayoutParams(-2, -2);
+            l.rightMargin = px(8);
+            row.addView(chip, l);
+        }
+        return scroll(row);
+    }
+
+    private TextView caption(String s) {
+        TextView cap = text(th.dim, 13);
+        cap.setText(s);
+        cap.setLetterSpacing(0.14f);
+        return cap;
+    }
 
     private void open(Intent i) {
         try {

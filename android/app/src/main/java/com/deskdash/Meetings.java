@@ -100,6 +100,40 @@ final class Meetings {
         return best == null ? null : new Meeting(e, best, url);
     }
 
+    /** A meeting link in any text (a pasted message, the clipboard), as a meeting without a calendar event. */
+    static Meeting find(String text, String title) {
+        if (text == null) return null;
+        String t = text.replaceAll("&amp;", "&");
+        Platform best = null;
+        String url = null;
+        int at = Integer.MAX_VALUE;
+        for (Platform p : ALL) {
+            Matcher m = p.link.matcher(t);
+            if (m.find() && m.start() < at) {
+                best = p;
+                url = m.group().replaceAll("[.,;]+$", "");
+                at = m.start();
+            }
+        }
+        if (best == null) {
+            Matcher m = Pattern.compile("https?://" + TAIL).matcher(t);
+            if (!m.find()) return null;
+            best = WEB;
+            url = m.group().replaceAll("[.,;]+$", "");
+        }
+        long now = System.currentTimeMillis();
+        CalEvent e = new CalEvent(title == null || title.isEmpty() ? best.name : title, now, now + 3_600_000L, false);
+        e.url = url;
+        return new Meeting(e, best, url);
+    }
+
+    /** Start a new meeting right away: {name, link}. */
+    static final String[][] NEW = {
+            {"Телемост", "https://telemost.yandex.ru/"},
+            {"Google Meet", "https://meet.google.com/new"},
+            {"Jitsi", "https://meet.jit.si/"},
+    };
+
     /** Today's calls that haven't ended yet, in time order. */
     static List<Meeting> upcoming(List<CalEvent> events, long now) {
         List<Meeting> out = new ArrayList<>();

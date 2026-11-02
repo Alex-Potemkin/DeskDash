@@ -1,6 +1,10 @@
 package com.deskdash;
 
+import android.app.AlarmManager;
 import android.content.ActivityNotFoundException;
+import android.content.ClipData;
+import android.content.ClipDescription;
+import android.content.ClipboardManager;
 import android.content.Context;
 import android.content.Intent;
 import android.content.res.ColorStateList;
@@ -17,7 +21,13 @@ import android.graphics.Shader;
 import android.graphics.Typeface;
 import android.graphics.drawable.Drawable;
 import android.graphics.drawable.GradientDrawable;
+import android.hardware.Sensor;
+import android.hardware.SensorEvent;
+import android.hardware.SensorEventListener;
+import android.hardware.SensorManager;
 import android.media.AudioManager;
+import android.media.Ringtone;
+import android.media.RingtoneManager;
 import android.media.MediaMetadata;
 import android.media.session.MediaController;
 import android.media.session.PlaybackState;
@@ -28,9 +38,12 @@ import android.os.Looper;
 import android.os.SystemClock;
 import android.provider.CalendarContract;
 import android.provider.Settings;
+import android.text.Editable;
+import android.text.InputType;
 import android.text.SpannableStringBuilder;
 import android.text.Spanned;
 import android.text.TextUtils;
+import android.text.TextWatcher;
 import android.text.style.ForegroundColorSpan;
 import android.text.style.RelativeSizeSpan;
 import android.util.TypedValue;
@@ -44,6 +57,7 @@ import android.view.View;
 import android.view.ViewOutlineProvider;
 import android.view.Window;
 import android.view.WindowManager;
+import android.widget.EditText;
 import android.widget.FrameLayout;
 import android.widget.HorizontalScrollView;
 import android.widget.ImageView;
@@ -81,7 +95,10 @@ import java.util.concurrent.atomic.AtomicBoolean;
 
 /**
  * The whole dashboard. Shows the current desk of the active profile: columns of blocks (clock,
- * music, PC macros, calendar, smart home tiles); horizontal swipes or the dots at the bottom switch desks.
+ * music, PC macros, calendar, smart home tiles, weather); horizontal swipes or the dots at the bottom switch desks.
+ * The same blocks in other looks (Settings → «Вид»): cards ("bento"), a big clock with the desks on a tap
+ * ("focus"), sections on a side rail ("dock") and the day as a strip ("ribbon"). At night: a dim clock only,
+ * the desk in night colours or the own theme quieter; night starts by the clock, at sunset or when the room goes dark.
  * Vertical swipes along the right edge change volume, along the left edge brightness.
  * Hosted by MainActivity and by the DashDream screensaver.
  */
@@ -197,6 +214,38 @@ public class DashboardView extends FrameLayout {
     private float edgeY0, edgeV0, edgeValue;
     private int lastVolStep = -1;
 
+    // weather
+    private volatile Weather weather;
+    private final List<WeatherPanel> weatherPanels = new ArrayList<>();
+    private TextView weatherLine;
+    private long weatherTryAt;
+    private String rainHidden = "";
+
+    // looks: focus, dock and ribbon; peeking at the desk from the focus or night clock
+    private String look = "classic";
+    private boolean peeking, deskSwipe, bigClock;
+    private long peekUntil;
+    private TextView dockTime;
+    private RibbonView ribbon;
+    private List<CalEvent> ribbonEvents = new ArrayList<>();
+    private LinearLayout focusPills;
+    private String nightText = "";
+
+    // night by the room light
+    private SensorManager sensors;
+    private boolean luxNight, haveLux;
+    private float lux = -1;
+    private long darkSince, brightSince;
+
+    // calls on this phone, links from the clipboard, smart home reactions
+    private PhoneCalls.Call phoneCall;
+    private Meetings.Meeting clipLink;
+    private long clipStamp = -1;
+    private int slowTick;
+    private final Set<String> reminded = new HashSet<>();
+    private boolean callWasOn, callLightOn;
+    private int dawnStep = -1;
+
     private final ContentObserver calObserver = new ContentObserver(ui) {
         @Override
         public void onChange(boolean selfChange) {
@@ -215,6 +264,7 @@ public class DashboardView extends FrameLayout {
         dp = getResources().getDisplayMetrics().density;
         audio = c.getSystemService(AudioManager.class);
         home = new SmartHome(prefs);
+        weather = Weather.cached(prefs);
         loadMacroCache();
         music =new MusicWatcher(c, new MusicWatcher.Listener() {
             @Override
@@ -260,6 +310,8 @@ public class DashboardView extends FrameLayout {
         ui.post(secondTick);
         ui.post(pcPoll);
         ui.post(homePoll);
+        ui.post(weatherPoll);
+        startLightSensor();
         reloadCalendar();
         if (CalendarRepo.hasPermission(ctx)) {
             try {
@@ -277,7 +329,9 @@ public class DashboardView extends FrameLayout {
         ui.removeCallbacks(secondTick);
         ui.removeCallbacks(pcPoll);
         ui.removeCallbacks(homePoll);
+        ui.removeCallbacks(weatherPoll);
         ui.removeCallbacks(reloadCal);
+        stopLightSensor();
         flushMusic();
         Bambu.stopAll();
         music.stop();
@@ -306,9 +360,21 @@ public class DashboardView extends FrameLayout {
         sheet = null;
         forgetBlockViews();
         nightActive = isNight();
-        th = nightActive ? DashTheme.byId("night") : DashTheme.byId(prefs.theme());
+        DashTheme base = DashTheme.byId(prefs.theme());
+        th = !nightActive ? base : "dim".equals(prefs.nightLook()) ? base.dimmed() : DashTheme.night(prefs.nightTint());
         setBackgroundColor(th.bg);
         renderedDay = null;
+        hasBar = false;
+        bigClock = false;
+
+        look = prefs.uiStyle();
+        boolean nightClock = nightActive && "clock".equals(prefs.nightLook());
+        if (peeking) {
+            if ("focus".equals(look)) look = "classic";
+        } else if (nightClock) {
+            look = "night";
+        }
+        deskSwipe = "classic".equals(look) || "bento".equals(look);
 
         JSONArray desks = Desks.load(prefs);
         deskCount = desks.length();
@@ -324,23 +390,70 @@ public class DashboardView extends FrameLayout {
         addView(content, new LayoutParams(LayoutParams.MATCH_PARENT, LayoutParams.MATCH_PARENT));
 
         Set<String> used = new HashSet<>();
+        switch (look) {
+            case "night":
+                buildNight();
+                break;
+            case "focus":
+                buildFocus();
+                break;
+            case "dock":
+                buildDock(desk, portrait, used);
+                break;
+            case "ribbon":
+                buildRibbon(desks);
+                break;
+            default:
+                buildDesk(content, desk, portrait, used, "bento".equals(look));
+                break;
+        }
+        level = new LevelView(ctx);
+        level.setAlpha(0f);
+        addView(level, new LayoutParams(px(52), px(200), Gravity.CENTER_VERTICAL | Gravity.END));
+        if (deskSwipe && !"dock".equals(look)) buildBar(di, !used.contains("calendar") && !used.contains("clock"));
+        else if (deskSwipe) buildBar(di, false);
+
+        applyPadding();
+        applyNightWindow();
+        updateNightText();
+        sizeClock();
+        tickClock();
+        renderCalendar();
+        renderMusic();
+        renderMacros();
+        renderPc();
+        renderHome();
+        renderWeather();
+        buildLive();
+        callsSig = "";
+        renderCalls();
+        renderStats();
+    }
+
+    /** Columns of blocks of one desk; "bento" puts every block on its own card. */
+    private void buildDesk(LinearLayout into, JSONObject desk, boolean portrait, Set<String> used, boolean bento) {
+        int card = th.surface;
+        if (bento) th = th.lifted();
         JSONArray cols = desk.optJSONArray("cols");
         int ncols = cols == null ? 0 : cols.length();
         for (int i = 0; i < ncols; i++) {
             JSONObject col = cols.optJSONObject(i);
             if (col == null) continue;
-            if (content.getChildCount() > 0) {
+            if (into.getChildCount() > 0) {
                 View div = new View(ctx);
-                div.setBackgroundColor(th.line);
                 LinearLayout.LayoutParams dl;
-                if (portrait) {
+                if (bento) {
+                    dl = portrait ? new LinearLayout.LayoutParams(-1, px(12)) : new LinearLayout.LayoutParams(px(12), -1);
+                } else if (portrait) {
+                    div.setBackgroundColor(th.line);
                     dl = new LinearLayout.LayoutParams(-1, Math.max(1, (int) dp));
                     dl.setMargins(0, px(14), 0, px(14));
                 } else {
+                    div.setBackgroundColor(th.line);
                     dl = new LinearLayout.LayoutParams(Math.max(1, (int) dp), -1);
                     dl.setMargins(px(22), px(8), px(22), px(8));
                 }
-                content.addView(div, dl);
+                into.addView(div, dl);
             }
             LinearLayout colView = vertical();
             JSONArray blocks = col.optJSONArray("blocks");
@@ -353,31 +466,22 @@ public class DashboardView extends FrameLayout {
                 if (v == null) continue;
                 int h = b.optInt("h", Desks.defaultHeight(t));
                 if (h <= 0 && Desks.needsHeight(t)) h = 1;
+                if (bento && !"music".equals(t)) v = card(v, card, h > 0);
                 LinearLayout.LayoutParams lp = h > 0 ? new LinearLayout.LayoutParams(-1, 0, h) : new LinearLayout.LayoutParams(-1, -2);
                 if (colView.getChildCount() > 0) lp.topMargin = px(12);
                 colView.addView(v, lp);
             }
             int w = Math.max(1, col.optInt("w", 50));
-            content.addView(colView, portrait ? new LinearLayout.LayoutParams(-1, 0, w) : new LinearLayout.LayoutParams(0, -1, w));
+            into.addView(colView, portrait ? new LinearLayout.LayoutParams(-1, 0, w) : new LinearLayout.LayoutParams(0, -1, w));
         }
-        level = new LevelView(ctx);
-        level.setAlpha(0f);
-        addView(level, new LayoutParams(px(52), px(200), Gravity.CENTER_VERTICAL | Gravity.END));
-        buildBar(di, !used.contains("calendar") && !used.contains("clock"));
+    }
 
-        applyPadding();
-        applyNightWindow();
-        sizeClock();
-        tickClock();
-        renderCalendar();
-        renderMusic();
-        renderMacros();
-        renderPc();
-        renderHome();
-        buildLive();
-        callsSig = "";
-        renderCalls();
-        renderStats();
+    private View card(View v, int color, boolean fill) {
+        FrameLayout f = new FrameLayout(ctx);
+        f.setBackground(rounded(color, 22));
+        f.setPadding(px(14), px(12), px(14), px(12));
+        f.addView(v, new FrameLayout.LayoutParams(-1, fill ? -1 : -2));
+        return f;
     }
 
     /** Block views of the previous desk; every render method skips blocks that aren't on screen. */
@@ -398,6 +502,11 @@ public class DashboardView extends FrameLayout {
         live = null;
         homePanels.clear();
         hOwners.clear();
+        weatherPanels.clear();
+        weatherLine = null;
+        dockTime = null;
+        ribbon = null;
+        focusPills = null;
     }
 
     private View buildBlock(String type, JSONObject b) {
@@ -409,13 +518,19 @@ public class DashboardView extends FrameLayout {
             case "home": return buildHome(b);
             case "calls": return buildCalls();
             case "stats": return buildStats();
+            case "weather": return buildWeather();
             default: return null;
         }
     }
 
     private View buildClock() {
+        return buildClock(false);
+    }
+
+    /** Centered: the focus and night looks, where the clock is alone in the middle of the screen. */
+    private View buildClock(boolean centered) {
         LinearLayout clockBox = vertical();
-        clockBox.setGravity(Gravity.CENTER_VERTICAL);
+        clockBox.setGravity(centered ? Gravity.CENTER : Gravity.CENTER_VERTICAL);
         String style = prefs.clockStyle();
         if ("digital".equals(style)) {
             fancy = null;
@@ -438,7 +553,23 @@ public class DashboardView extends FrameLayout {
         hint.setMaxLines(2);
         hint.setEllipsize(TextUtils.TruncateAt.END);
         hint.setLineSpacing(0, 1.15f);
+        if (Weather.configured(prefs) && prefs.weatherClock() && !centered) {
+            weatherLine = text(th.text, 15);
+            weatherLine.setSingleLine();
+            weatherLine.setEllipsize(TextUtils.TruncateAt.END);
+            weatherLine.setCompoundDrawablePadding(px(8));
+            weatherLine.setGravity(Gravity.CENTER_VERTICAL | (centered ? Gravity.CENTER_HORIZONTAL : Gravity.START));
+            weatherLine.setVisibility(GONE);
+            weatherLine.setOnClickListener(v -> openWeatherSheet());
+            clockBox.addView(weatherLine, margins(-1, -2, 0, 6, 0, 0));
+        }
         clockBox.addView(hint, margins(-1, -2, 0, 8, 0, 0));
+        if (centered) {
+            if (clock != null) clock.setGravity(Gravity.CENTER_HORIZONTAL);
+            dateText.setGravity(Gravity.CENTER_HORIZONTAL);
+            hint.setGravity(Gravity.CENTER_HORIZONTAL);
+            hint.setMaxLines(3);
+        }
 
         GestureDetector gd = new GestureDetector(ctx, new GestureDetector.SimpleOnGestureListener() {
             @Override
@@ -464,6 +595,12 @@ public class DashboardView extends FrameLayout {
                 prefs.setClockStyle(n);
                 build();
                 Toast.makeText(ctx, "Часы: " + FancyClock.name(n), Toast.LENGTH_SHORT).show();
+                return true;
+            }
+
+            @Override
+            public boolean onSingleTapConfirmed(MotionEvent e) {
+                if ("focus".equals(look) || "night".equals(look)) peek();
                 return true;
             }
 
@@ -687,6 +824,14 @@ public class DashboardView extends FrameLayout {
             updateProgress();
             countMusic();
             if (callPanel != null) callPanel.tick();
+            slowTick++;
+            if (prefs.phoneCalls() && slowTick % 2 == 0) pollPhoneCall();
+            if (callPanel != null && slowTick % 5 == 0) checkClipboard();
+            if (haveLux) evalLux();
+            if (peeking && SystemClock.elapsedRealtime() > peekUntil && sheet == null && picker == null) {
+                peeking = false;
+                build();
+            }
             renderLive();
             LocalTime t = LocalTime.now();
             int m = t.getHour() * 60 + t.getMinute();
@@ -700,8 +845,17 @@ public class DashboardView extends FrameLayout {
     };
 
     private void onMinute() {
-        if (isNight() != nightActive) build();
+        boolean night = isNight();
+        if (night != nightActive) {
+            nightChanged(night);
+            build();
+        } else if (edge == 0) {
+            applyNightWindow();
+        }
+        updateNightText();
+        dawnTick();
         if (timeline != null) timeline.invalidate();
+        if (ribbon != null) ribbon.invalidate();
         LocalDate now = LocalDate.now();
         boolean idle = SystemClock.elapsedRealtime() - lastCalTouch > CAL_IDLE_MS;
         if (!now.equals(todayRef)) {
@@ -714,15 +868,18 @@ public class DashboardView extends FrameLayout {
             reloadCalendar();
         }
         if (prefs.burnIn() && content != null) {
-            content.animate().translationX((rnd.nextFloat() * 10 - 5) * dp).translationY((rnd.nextFloat() * 8 - 4) * dp).setDuration(2000).start();
+            // the night clock stays on for hours at the same place: it wanders further
+            float k = "night".equals(look) ? 8 : 1;
+            content.animate().translationX((rnd.nextFloat() * 10 - 5) * dp * k).translationY((rnd.nextFloat() * 8 - 4) * dp * k).setDuration(2000).start();
         }
         if (idle && !monthMode && shownDay.equals(now)) scrollToNow(true);
         renderStats();
     }
 
     private void tickClock() {
-        if (dateText == null) return;
         LocalDateTime now = LocalDateTime.now();
+        if (dockTime != null) dockTime.setText(now.format(DateTimeFormatter.ofPattern(prefs.h24() ? "H:mm" : "h:mm")));
+        if (dateText == null) return;
         if (clock != null) {
             SpannableStringBuilder sb = new SpannableStringBuilder(now.format(DateTimeFormatter.ofPattern(prefs.h24() ? "HH:mm" : "h:mm")));
             if (prefs.seconds()) {
@@ -743,12 +900,12 @@ public class DashboardView extends FrameLayout {
         }
         String date = now.format(DateTimeFormatter.ofPattern("EEEE, d MMMM"));
         dateText.setText(date.isEmpty() ? date : Character.toUpperCase(date.charAt(0)) + date.substring(1));
-        hint.setText(nextHint());
+        hint.setText("night".equals(look) ? nightText : nextHint());
     }
 
     /** Digital clock as big as its block allows. */
     private void sizeClock() {
-        if (clock == null) return;
+        if (clock == null || "ribbon".equals(look)) return;
         View box = (View) clock.getParent();
         int w = getWidth(), h = getHeight(), colW = box.getWidth(), boxH = box.getHeight();
         if (w == 0 || colW == 0) return;
@@ -756,9 +913,9 @@ public class DashboardView extends FrameLayout {
         float ems = prefs.seconds() ? 3.15f : 2.55f;
         if (!prefs.h24()) ems += 0.2f;
         if (prefs.clockFont().equals("mono")) ems *= 1.2f;
-        float size = Math.min(colW * 0.9f / ems, (portrait ? h * 0.45f : h) * 0.25f);
+        float size = Math.min(colW * 0.9f / ems, (portrait ? h * 0.45f : h) * (bigClock ? 0.4f : 0.25f));
         // leave room for the date and the next-event hint under the digits
-        if (boxH > 0) size = Math.min(size, (boxH - px(70)) / 1.1f);
+        if (boxH > 0) size = Math.min(size, (boxH - px(weatherLine != null ? 106 : 70) - box.getPaddingTop() - box.getPaddingBottom()) / 1.1f);
         clock.setTextSize(TypedValue.COMPLEX_UNIT_PX, Math.max(px(28), size));
     }
 
@@ -811,14 +968,160 @@ public class DashboardView extends FrameLayout {
 
     private boolean isNight() {
         if (!prefs.nightMode()) return false;
-        int h = LocalTime.now().getHour(), from = prefs.nightFrom(), to = prefs.nightTo();
-        if (from == to) return false;
-        return from > to ? h >= from || h < to : h >= from && h < to;
+        switch (prefs.nightTrigger()) {
+            case "light":
+                if (haveLux) return luxNight;
+                break; // no light sensor (yet): by the clock
+            case "sun": {
+                Weather w = weather;
+                Boolean dark = w == null ? null : w.dark(System.currentTimeMillis());
+                if (dark != null) return dark;
+                break;
+            }
+            default:
+                break;
+        }
+        return inNightHours(minuteOfDay());
     }
 
+    private boolean inNightHours(int m) {
+        int from = prefs.nightStart(), to = prefs.nightEnd();
+        if (from == to) return false;
+        return from > to ? m >= from || m < to : m >= from && m < to;
+    }
+
+    private static int minuteOfDay() {
+        LocalTime t = LocalTime.now();
+        return t.getHour() * 60 + t.getMinute();
+    }
+
+    /** Night brightness at night; over the half hour before it the screen slides there from the day brightness. */
     private void applyNightWindow() {
-        float b = prefs.brightness();
-        setWindowBrightness(nightActive ? 0.01f : b >= 0 ? b : WindowManager.LayoutParams.BRIGHTNESS_OVERRIDE_NONE);
+        float b = prefs.brightness(), night = prefs.nightBright() / 100f;
+        if (nightActive) {
+            setWindowBrightness(night);
+            return;
+        }
+        float f = fadeFactor();
+        if (f < 1f) {
+            float day = b >= 0 ? b : systemBrightness();
+            setWindowBrightness(Math.min(day, night + (day - night) * f));
+        } else {
+            setWindowBrightness(b >= 0 ? b : WindowManager.LayoutParams.BRIGHTNESS_OVERRIDE_NONE);
+        }
+    }
+
+    /** 1 = day, falling to 0 over the 30 minutes before the night starts. */
+    private float fadeFactor() {
+        if (!prefs.nightMode() || !prefs.nightFade() || "light".equals(prefs.nightTrigger())) return 1f;
+        long now = System.currentTimeMillis(), start = 0;
+        Weather w = weather;
+        Weather.Day d = w == null ? null : w.today();
+        if ("sun".equals(prefs.nightTrigger()) && d != null && d.sunset > 0) {
+            start = d.sunset + 30 * 60_000L;
+        } else {
+            start = LocalDate.now().atStartOfDay(ZoneId.systemDefault()).toInstant().toEpochMilli() + prefs.nightStart() * 60_000L;
+        }
+        long left = start - now;
+        if (left < -12 * 3_600_000L) left += 86_400_000L; // a night that starts after midnight
+        if (left <= 0 || left > 30 * 60_000L) return 1f;
+        return left / (30 * 60_000f);
+    }
+
+    private float systemBrightness() {
+        try {
+            return Settings.System.getInt(ctx.getContentResolver(), Settings.System.SCREEN_BRIGHTNESS) / 255f;
+        } catch (Settings.SettingNotFoundException e) {
+            return 0.5f;
+        }
+    }
+
+    /** Under the night clock: the next alarm and the weather for the morning. */
+    private void updateNightText() {
+        if (!"night".equals(look)) return;
+        StringBuilder sb = new StringBuilder();
+        AlarmManager am = ctx.getSystemService(AlarmManager.class);
+        AlarmManager.AlarmClockInfo a = am == null ? null : am.getNextAlarmClock();
+        if (a != null && a.getTriggerTime() - System.currentTimeMillis() < 20 * 3_600_000L) sb.append("Будильник ").append(fmt(a.getTriggerTime()));
+        Weather w = weather;
+        if (w != null) {
+            String s = LocalTime.now().getHour() >= 12 ? w.morning() : null;
+            if (s == null && !Double.isNaN(w.temp)) s = "Сейчас " + Weather.deg(w.temp) + ", " + Weather.text(w.code).toLowerCase(Locale.getDefault());
+            if (s != null) sb.append(sb.length() > 0 ? "\n" : "").append(s);
+        }
+        nightText = sb.toString();
+        if (hint != null) hint.setText(nightText);
+    }
+
+    /** Tap on the focus or night clock: the desks for a while, then back to the clock. */
+    private void peek() {
+        peeking = true;
+        peekUntil = SystemClock.elapsedRealtime() + ("night".equals(look) ? 30_000 : 60_000);
+        build();
+        flashBarLabel("night".equals(look) ? "" : deskName);
+    }
+
+    private void startLightSensor() {
+        haveLux = false;
+        if (!prefs.nightMode() || !"light".equals(prefs.nightTrigger())) return;
+        sensors = ctx.getSystemService(SensorManager.class);
+        Sensor s = sensors == null ? null : sensors.getDefaultSensor(Sensor.TYPE_LIGHT);
+        if (s == null) {
+            sensors = null;
+            return;
+        }
+        sensors.registerListener(luxListener, s, SensorManager.SENSOR_DELAY_NORMAL);
+    }
+
+    private void stopLightSensor() {
+        if (sensors != null) sensors.unregisterListener(luxListener);
+        sensors = null;
+    }
+
+    private final SensorEventListener luxListener = new SensorEventListener() {
+        @Override
+        public void onSensorChanged(SensorEvent e) {
+            boolean first = !haveLux;
+            lux = e.values[0];
+            haveLux = true;
+            if (first) {
+                // the first reading decides at once: no waiting when the dashboard starts in a dark room
+                luxNight = lux <= prefs.nightLux();
+                if (isNight() != nightActive) {
+                    nightChanged(isNight());
+                    build();
+                }
+            }
+            evalLux();
+        }
+
+        @Override
+        public void onAccuracyChanged(Sensor s, int accuracy) {}
+    };
+
+    /** Dark for 45 s turns the night on, light for 8 s turns it off: a passing shadow or a phone screen don't. */
+    private void evalLux() {
+        long now = SystemClock.elapsedRealtime();
+        int thr = prefs.nightLux();
+        if (lux <= thr) {
+            brightSince = 0;
+            if (darkSince == 0) darkSince = now;
+        } else if (lux > thr * 3 + 3) {
+            darkSince = 0;
+            if (brightSince == 0) brightSince = now;
+        } else {
+            darkSince = brightSince = 0;
+        }
+        boolean want = luxNight;
+        if (!luxNight && darkSince > 0 && now - darkSince > 45_000) want = true;
+        if (luxNight && brightSince > 0 && now - brightSince > 8_000) want = false;
+        if (want != luxNight) {
+            luxNight = want;
+            if (isNight() != nightActive) {
+                nightChanged(isNight());
+                build();
+            }
+        }
     }
 
     private void setWindowBrightness(float v) {
@@ -853,7 +1156,8 @@ public class DashboardView extends FrameLayout {
         downX = e.getX();
         downY = e.getY();
         swiping = false;
-        swipeOk = deskCount > 1 && edge == 0 && !inHorizontalOwner(e.getRawX(), e.getRawY());
+        swipeOk = deskSwipe && deskCount > 1 && edge == 0 && !inHorizontalOwner(e.getRawX(), e.getRawY());
+        if (peeking) peekUntil = Math.max(peekUntil, SystemClock.elapsedRealtime() + 30_000);
     }
 
     /** Clock, month grid and horizontal scrollers handle sideways swipes themselves. */
@@ -973,7 +1277,7 @@ public class DashboardView extends FrameLayout {
             }
             level.set(v == 0 ? R.drawable.ic_mute : R.drawable.ic_vol_up, v / (float) Math.max(1, max));
         } else {
-            f = Math.max(0.05f, f);
+            f = Math.max(nightActive ? 0.01f : 0.05f, f);
             setWindowBrightness(f);
             level.set(R.drawable.ic_brightness, f);
         }
@@ -982,7 +1286,8 @@ public class DashboardView extends FrameLayout {
 
     private void endEdge() {
         edgeActive = false;
-        if (edge == 2 && !nightActive) prefs.setBrightness(edgeValue);
+        if (edge == 2 && nightActive) prefs.raw().edit().putInt("night_bright", Math.max(1, Math.min(40, Math.round(edgeValue * 100)))).apply();
+        else if (edge == 2) prefs.setBrightness(edgeValue);
         level.animate().alpha(0f).setStartDelay(700).setDuration(400).start();
     }
 
@@ -995,6 +1300,12 @@ public class DashboardView extends FrameLayout {
         YearMonth ym = shownMonth;
         io.execute(() -> {
             List<CalEvent> todayList = CalendarRepo.load(ctx, prefs, today);
+            List<CalEvent> strip = null;
+            if ("ribbon".equals(look)) {
+                strip = new ArrayList<>(todayList);
+                if (LocalTime.now().getHour() >= 12) strip.addAll(CalendarRepo.load(ctx, prefs, today.plusDays(1)));
+            }
+            List<CalEvent> stripNow = strip;
             List<CalEvent> view;
             if (month) {
                 LocalDate gs = MonthView.gridStart(ym);
@@ -1004,6 +1315,10 @@ public class DashboardView extends FrameLayout {
             }
             ui.post(() -> {
                 todayEvents = todayList;
+                if (stripNow != null) {
+                    ribbonEvents = stripNow;
+                    if (ribbon != null) ribbon.setData(ribbonEvents, weather);
+                }
                 renderCalls();
                 renderStats();
                 if (month == monthMode && day.equals(shownDay) && ym.equals(shownMonth)) {
@@ -1897,6 +2212,12 @@ public class DashboardView extends FrameLayout {
             public Bitmap image(HomeDevice d) {
                 return homeImage(d);
             }
+
+            @Override
+            public void onAllOff(List<HomeDevice> on) {
+                for (HomeDevice d : on) homeAction(d, x -> x.on = false, () -> home.setOn(d, false));
+                Toast.makeText(ctx, "Выключаю: " + on.size(), Toast.LENGTH_SHORT).show();
+            }
         });
         homePanels.add(p);
         return p;
@@ -1952,7 +2273,8 @@ public class DashboardView extends FrameLayout {
     };
 
     private void pollHome(boolean forceYandex) {
-        if (homePanels.isEmpty() && !prefs.live() || !SmartHome.configured(prefs) || !homeBusy.compareAndSet(false, true)) return;
+        boolean auto = !prefs.autoCall().isEmpty() || !prefs.autoNight().isEmpty() || !prefs.autoDawn().isEmpty();
+        if (homePanels.isEmpty() && !prefs.live() && !auto || !SmartHome.configured(prefs) || !homeBusy.compareAndSet(false, true)) return;
         io.execute(() -> {
             try {
                 home.poll(forceYandex);
@@ -1986,6 +2308,11 @@ public class DashboardView extends FrameLayout {
     /** Shows the expected result at once, sends the command, then re-reads the real state. */
     private void homeAction(HomeDevice d, SmartHome.Change optimistic, HomeCall call) {
         DayStats.add(ctx, "home", 1);
+        homeSend(d, optimistic, call);
+    }
+
+    /** The same without counting a tap: what automations send. */
+    private void homeSend(HomeDevice d, SmartHome.Change optimistic, HomeCall call) {
         if (optimistic != null) {
             home.local(d.id, optimistic);
             renderHome();
@@ -2087,6 +2414,22 @@ public class DashboardView extends FrameLayout {
             public void onSetup() {
                 openSettings();
             }
+
+            @Override
+            public void onPhone(PhoneCalls.Call c, String action) {
+                String err = PhoneCalls.act(ctx, c, action);
+                if (err != null) Toast.makeText(ctx, err, Toast.LENGTH_SHORT).show();
+                ui.postDelayed(() -> {
+                    phoneCall = PhoneCalls.current(ctx);
+                    callsSig = "";
+                    renderCalls();
+                }, 600);
+            }
+
+            @Override
+            public void onQuick() {
+                openQuickJoin();
+            }
         });
         return callPanel;
     }
@@ -2107,12 +2450,22 @@ public class DashboardView extends FrameLayout {
             sig.append('#').append(live.micMuted);
             for (PcClient.Call c : live.calls) sig.append(c.id).append(c.camera).append(c.title).append(c.since);
         }
+        PhoneCalls.Call ph = phoneCall;
+        boolean mic = ph != null && PhoneCalls.micMuted(ctx), spk = ph != null && PhoneCalls.speaker(ctx);
+        if (ph != null) sig.append('@').append(ph.key).append(ph.ringing).append(ph.title).append(mic).append(spk).append(ph.mute != null);
+        if (clipLink != null) sig.append('^').append(clipLink.url);
         if (sig.toString().equals(callsSig)) return;
         callsSig = sig.toString();
-        callPanel.render(today, live, pcOnline, stream, prefs.callRemind());
+        callPanel.render(today, live, pcOnline, stream, prefs.callRemind(), ph, mic, spk, clipLink);
     }
 
     private void joinMeeting(Meetings.Meeting m, boolean onPc) {
+        if (m == clipLink) {
+            rememberLink(m);
+            clipLink = null;
+            callsSig = "";
+            renderCalls();
+        }
         PcClient c = pc;
         if (onPc && c != null && pcOnline) {
             Toast.makeText(ctx, "Открываю «" + m.event.title + "» на ПК", Toast.LENGTH_SHORT).show();
@@ -2327,12 +2680,21 @@ public class DashboardView extends FrameLayout {
             if (d.busy()) busy.add(d);
         }
         PcClient.Calls calls = pcOnline ? pcCalls : null;
+        PhoneCalls.Call ph = phoneCall;
         if (text == null && alarm != null) {
             HomeDevice a = alarm;
             text = a.name + ": " + a.status();
             color = 0xFFE5534B;
             pulse = true;
             action = () -> openHomeSheet(a);
+        }
+        if (text == null && ph != null) {
+            String who = ph.title.isEmpty() ? ph.app : ph.title;
+            text = ph.ringing ? "Входящий · " + who + " · " + ph.app
+                    : who + " · " + CallPanel.clock((now - ph.since) / 1000) + (PhoneCalls.micMuted(ctx) ? " · микрофон выкл" : "");
+            color = ph.color;
+            pulse = true;
+            action = () -> PhoneCalls.act(ctx, ph, "open");
         }
         if (text == null && calls != null && !calls.calls.isEmpty()) {
             PcClient.Call c = calls.calls.get(0);
@@ -2349,14 +2711,25 @@ public class DashboardView extends FrameLayout {
                 text = m.event.title + " · " + CallPanel.countdown(m, now) + " · подключиться";
                 color = m.platform.color;
                 pulse = till <= 60_000;
-                action = () -> joinMeeting(m, pcOnline);
+                action = () -> joinMeeting(m, pcOnline && "pc".equals(prefs.callJoin()));
+                if (till > 0 && reminded.add(m.event.start + m.url) && prefs.callSound() && !nightActive) chime();
                 break;
             }
         }
-        if (text == null && !busy.isEmpty()) {
+        if (text == null && !busy.isEmpty() && !nightActive) {
             HomeDevice d = busy.get((int) (now / 6000 % busy.size()));
             text = d.name + " · " + d.status() + (d.remainingMin > 0 ? " · до " + HomeDevice.finishAt(d.remainingMin) : "");
             action = () -> openHomeSheet(d);
+        }
+        Weather w = weather;
+        String rain = text == null && w != null && prefs.weatherRain() && !nightActive ? w.precipitationSoon(now) : null;
+        if (rain != null && !rain.equals(rainHidden)) {
+            text = rain;
+            color = 0xFF5AA7E0;
+            action = () -> {
+                rainHidden = rain;
+                renderLive();
+            };
         }
         if (text == null) {
             if (live.getVisibility() == VISIBLE) {
@@ -2453,6 +2826,8 @@ public class DashboardView extends FrameLayout {
             host.open(StreamActivity.class);
         });
         menuRow(m, "Статистика дня", false, this::openDayDetails);
+        if (Weather.configured(prefs)) menuRow(m, "Погода", false, this::openWeatherSheet);
+        menuRow(m, "Вид: " + lookName(prefs.uiStyle()) + "…", false, this::openLooks);
         menuRow(m, "Столы и блоки…", false, () -> {
             closeSheet();
             host.open(DeskEditorActivity.class);
@@ -2583,11 +2958,608 @@ public class DashboardView extends FrameLayout {
         ui.postDelayed(hideBarLabel, 1800);
     }
 
+    // ---------------------------------------------------------------- weather
+
+    private View buildWeather() {
+        WeatherPanel p = new WeatherPanel(ctx, th, nightActive, new WeatherPanel.Listener() {
+            @Override
+            public void onTap() {
+                weatherTryAt = 0;
+                fetchWeather(true);
+            }
+
+            @Override
+            public void onSetup() {
+                openSettings();
+            }
+        });
+        hOwners.add(p.hourStrip());
+        weatherPanels.add(p);
+        return p;
+    }
+
+    private final Runnable weatherPoll = new Runnable() {
+        @Override
+        public void run() {
+            if (!running) return;
+            fetchWeather(false);
+            ui.postDelayed(this, 60_000);
+        }
+    };
+
+    /** Every 15 minutes (a failed try waits 5); forced by a tap on the weather block. */
+    private void fetchWeather(boolean force) {
+        if (!Weather.configured(prefs)) return;
+        Weather w = weather;
+        long now = System.currentTimeMillis();
+        if (!force && (w != null && w.fresh() || now - weatherTryAt < 5 * 60_000L)) return;
+        weatherTryAt = now;
+        if (force) Toast.makeText(ctx, "Обновляю погоду…", Toast.LENGTH_SHORT).show();
+        io.execute(() -> {
+            try {
+                Weather fresh = Weather.fetch(prefs);
+                ui.post(() -> {
+                    weather = fresh;
+                    renderWeather();
+                    updateNightText();
+                    if (isNight() != nightActive) {
+                        nightChanged(isNight());
+                        build();
+                    }
+                });
+            } catch (Exception e) {
+                if (force) ui.post(() -> Toast.makeText(ctx, "Погода: " + SmartHome.msg(e), Toast.LENGTH_SHORT).show());
+            }
+        });
+    }
+
+    private void renderWeather() {
+        Weather w = weather;
+        String place = Weather.place(prefs);
+        for (WeatherPanel p : weatherPanels) p.render(w, place);
+        if (weatherLine != null) {
+            if (w == null || Double.isNaN(w.temp)) {
+                weatherLine.setVisibility(GONE);
+            } else {
+                StringBuilder sb = new StringBuilder(Weather.deg(w.temp)).append("  ").append(Weather.text(w.code));
+                Weather.Day d = w.today();
+                if (d != null) sb.append("  ·  ").append(Weather.deg(d.max)).append(" / ").append(Weather.deg(d.min));
+                weatherLine.setText(sb);
+                weatherLine.setCompoundDrawablesRelative(WeatherPanel.drawable(ctx, th, nightActive, w.code, w.isDay, px(22)), null, null, null);
+                weatherLine.setVisibility(VISIBLE);
+            }
+        }
+        if (ribbon != null) ribbon.setData(ribbonEvents, w);
+        renderFocusPills();
+    }
+
+    private void openWeatherSheet() {
+        WeatherPanel p = new WeatherPanel(ctx, th, nightActive, new WeatherPanel.Listener() {
+            @Override
+            public void onTap() {
+                closeSheet();
+            }
+
+            @Override
+            public void onSetup() {
+                closeSheet();
+                openSettings();
+            }
+        });
+        p.render(weather, Weather.place(prefs));
+        openSheet(p);
+        fetchWeather(false);
+    }
+
+    // ---------------------------------------------------------------- looks: focus, night clock, dock, ribbon
+
+    static final String[][] LOOKS = {
+            {"classic", "Колонки"}, {"bento", "Плитки"}, {"focus", "Фокус"}, {"dock", "Док"}, {"ribbon", "Лента дня"},
+    };
+
+    static String lookName(String id) {
+        for (String[] l : LOOKS) if (l[0].equals(id)) return l[1];
+        return LOOKS[0][1];
+    }
+
+    private void openLooks() {
+        LinearLayout m = menu("Вид экрана");
+        String cur = prefs.uiStyle();
+        for (String[] l : LOOKS) {
+            menuRow(m, l[1], l[0].equals(cur), () -> {
+                closeSheet();
+                prefs.setUiStyle(l[0]);
+                peeking = false;
+                build();
+            });
+        }
+        openSheet(m);
+    }
+
+    /** A big clock in the middle, the weather and the music under it; a tap shows the desks for a minute. */
+    private void buildFocus() {
+        bigClock = true;
+        content.setOrientation(LinearLayout.VERTICAL);
+        content.setGravity(Gravity.CENTER);
+        content.addView(buildClock(true), new LinearLayout.LayoutParams(-1, 0, 1));
+        focusPills = new LinearLayout(ctx);
+        focusPills.setGravity(Gravity.CENTER);
+        content.addView(focusPills, margins(-1, -2, 0, 8, 0, 8));
+        content.setOnClickListener(v -> peek());
+    }
+
+    private void renderFocusPills() {
+        if (focusPills == null) return;
+        focusPills.removeAllViews();
+        Weather w = weather;
+        if (w != null && !Double.isNaN(w.temp)) {
+            TextView p = pill(Weather.deg(w.temp) + "  " + Weather.text(w.code), v -> openWeatherSheet());
+            p.setCompoundDrawablesRelative(WeatherPanel.drawable(ctx, th, nightActive, w.code, w.isDay, px(20)), null, null, null);
+            p.setCompoundDrawablePadding(px(8));
+            focusPills.addView(p, margins(-2, -2, 5, 0, 5, 0));
+        }
+        MediaMetadata md = media == null ? null : media.getMetadata();
+        PcClient.SpState sp = spState;
+        String track = md != null ? md.getString(MediaMetadata.METADATA_KEY_TITLE) : sp != null && sp.hasTrack ? sp.title : null;
+        if (track != null && !track.isEmpty()) {
+            PlaybackState st = media == null ? null : media.getPlaybackState();
+            boolean playing = st != null ? st.getState() == PlaybackState.STATE_PLAYING : sp != null && sp.playing;
+            focusPills.addView(pill((playing ? "❚❚  " : "▶  ") + track, v -> {
+                transport(0);
+                ui.postDelayed(this::renderFocusPills, 500);
+            }), margins(-2, -2, 5, 0, 5, 0));
+        }
+    }
+
+    private TextView pill(String s, View.OnClickListener l) {
+        TextView t = text(th.text, 14);
+        t.setText(s);
+        t.setSingleLine();
+        t.setEllipsize(TextUtils.TruncateAt.END);
+        t.setMaxWidth(px(320));
+        t.setGravity(Gravity.CENTER_VERTICAL);
+        t.setPadding(px(14), px(8), px(16), px(8));
+        t.setBackground(rounded(th.surface, 20));
+        t.setOnClickListener(l);
+        return t;
+    }
+
+    /** Night: the clock alone, dim, wandering slowly; under it the alarm and the morning weather. */
+    private void buildNight() {
+        bigClock = true;
+        content.setOrientation(LinearLayout.VERTICAL);
+        content.setGravity(Gravity.CENTER);
+        content.addView(buildClock(true), new LinearLayout.LayoutParams(-1, 0, 1));
+        content.setOnClickListener(v -> peek());
+    }
+
+    /** id, icon, name of the dock sections. */
+    private static final Object[][] DOCK = {
+            {"main", R.drawable.ic_dashboard, "Стол"}, {"home", R.drawable.ic_home, "Дом"},
+            {"calendar", R.drawable.ic_calendar, "Календарь"}, {"calls", R.drawable.ic_camera, "Созвоны"},
+            {"weather", R.drawable.ic_weather, "Погода"}, {"music", R.drawable.ic_music, "Музыка"},
+            {"stats", R.drawable.ic_chart, "День"},
+    };
+
+    /** A rail of sections on the left, one section on the rest of the screen; "Стол" is the current desk. */
+    private void buildDock(JSONObject desk, boolean portrait, Set<String> used) {
+        content.setOrientation(LinearLayout.HORIZONTAL);
+        LinearLayout rail = vertical();
+        rail.setGravity(Gravity.CENTER_HORIZONTAL);
+        rail.setPadding(0, px(12), 0, px(8));
+        rail.setBackground(rounded(th.surface, 22));
+        dockTime = text(th.text, 16);
+        dockTime.setTypeface(Typeface.create("sans-serif-medium", Typeface.NORMAL));
+        dockTime.setOnLongClickListener(v -> {
+            openSettings();
+            return true;
+        });
+        rail.addView(dockTime, margins(-2, -2, 0, 0, 0, 8));
+        String page = prefs.dockPage();
+        List<Object[]> pages = new ArrayList<>();
+        for (Object[] pg : DOCK) {
+            if ("home".equals(pg[0]) && !SmartHome.configured(prefs)) continue;
+            if ("weather".equals(pg[0]) && !Weather.configured(prefs)) continue;
+            pages.add(pg);
+        }
+        boolean found = false;
+        for (Object[] pg : pages) found |= pg[0].equals(page);
+        if (!found) page = "main";
+        ScrollView rs = new ScrollView(ctx);
+        rs.setVerticalScrollBarEnabled(false);
+        LinearLayout items = vertical();
+        items.setGravity(Gravity.CENTER_HORIZONTAL);
+        rs.addView(items);
+        for (Object[] pg : pages) {
+            boolean sel = pg[0].equals(page);
+            LinearLayout item = vertical();
+            item.setGravity(Gravity.CENTER_HORIZONTAL);
+            ImageView ic = iconButton((int) pg[1], sel ? DashTheme.onColor(th.accent) : th.dim, 36);
+            if (sel) ic.setBackground(rounded(th.accent, 14));
+            item.addView(ic, new LinearLayout.LayoutParams(px(46), px(32)));
+            TextView l = text(sel ? th.text : th.dim, 10);
+            l.setText((String) pg[2]);
+            l.setSingleLine();
+            item.addView(l, margins(-2, -2, 0, 2, 0, 0));
+            String id = (String) pg[0];
+            item.setOnClickListener(v -> {
+                if (id.equals(prefs.dockPage())) return;
+                performHapticFeedback(HapticFeedbackConstants.VIRTUAL_KEY);
+                prefs.setDockPage(id);
+                build();
+            });
+            items.addView(item, margins(-1, -2, 0, 4, 0, 6));
+        }
+        rail.addView(rs, new LinearLayout.LayoutParams(-1, 0, 1));
+        ImageView more = iconButton(R.drawable.ic_more, th.dim, 34);
+        more.setOnClickListener(v -> openMenu());
+        rail.addView(more, new LinearLayout.LayoutParams(px(34), px(34)));
+        content.addView(rail, new LinearLayout.LayoutParams(px(72), -1));
+
+        LinearLayout area = new LinearLayout(ctx);
+        area.setOrientation(portrait ? LinearLayout.VERTICAL : LinearLayout.HORIZONTAL);
+        LinearLayout.LayoutParams al = new LinearLayout.LayoutParams(0, -1, 1);
+        al.leftMargin = px(20);
+        content.addView(area, al);
+        deskSwipe = "main".equals(page);
+        if (deskSwipe) {
+            buildDesk(area, desk, portrait, used, false);
+            return;
+        }
+        used.add("clock"); // the rail has ⋮: no bar needed
+        switch (page) {
+            case "home": {
+                JSONObject b = new JSONObject();
+                try {
+                    b.put("t", "home").put("title", "").put("items", new org.json.JSONArray());
+                } catch (Exception ignored) {
+                    // constant keys
+                }
+                HomePanel hp = (HomePanel) buildHome(b);
+                hp.setAuto();
+                hOwners.add(hp.roomStrip());
+                area.addView(hp, new LinearLayout.LayoutParams(-1, -1));
+                break;
+            }
+            case "calendar":
+                area.addView(buildCalendar(), new LinearLayout.LayoutParams(-1, -1));
+                break;
+            case "calls": {
+                area.addView(buildCalls(), new LinearLayout.LayoutParams(0, -1, 58));
+                LinearLayout side = vertical();
+                side.addView(buildClock(), new LinearLayout.LayoutParams(-1, 0, 1));
+                side.addView(buildPc(), new LinearLayout.LayoutParams(-1, -2));
+                LinearLayout.LayoutParams sl = new LinearLayout.LayoutParams(0, -1, 42);
+                sl.leftMargin = px(24);
+                area.addView(side, sl);
+                break;
+            }
+            case "weather":
+                area.addView(buildWeather(), new LinearLayout.LayoutParams(-1, -1));
+                break;
+            case "music": {
+                LinearLayout col = vertical();
+                col.setGravity(Gravity.CENTER_VERTICAL);
+                col.addView(buildClock(), new LinearLayout.LayoutParams(-1, 0, 1));
+                col.addView(buildMusic(), margins(-1, -2, 0, 12, 0, 0));
+                col.addView(buildPc(), margins(-1, -2, 0, 12, 0, 0));
+                area.addView(col, new LinearLayout.LayoutParams(-1, -1));
+                break;
+            }
+            default:
+                area.addView(buildStats(), new LinearLayout.LayoutParams(-1, -1));
+                break;
+        }
+    }
+
+    /** Clock and weather on top, the next hours as a strip in the middle, music and favourite tiles at the bottom. */
+    private void buildRibbon(JSONArray desks) {
+        content.setOrientation(LinearLayout.VERTICAL);
+        LinearLayout top = new LinearLayout(ctx);
+        top.setGravity(Gravity.CENTER_VERTICAL);
+        clock = text(th.text, 58);
+        clock.setTypeface(clockFace());
+        clock.setIncludeFontPadding(false);
+        clock.setSingleLine();
+        clock.setOnLongClickListener(v -> {
+            openSettings();
+            return true;
+        });
+        top.addView(clock);
+        LinearLayout words = vertical();
+        dateText = text(th.text, 18);
+        dateText.setTypeface(Typeface.create("sans-serif-light", Typeface.NORMAL));
+        words.addView(dateText);
+        hint = text(th.dim, 13);
+        hint.setMaxLines(2);
+        hint.setEllipsize(TextUtils.TruncateAt.END);
+        words.addView(hint);
+        top.addView(words, margins(0, -2, 18, 0, 12, 0, 1));
+        if (Weather.configured(prefs)) {
+            View wp = buildWeather();
+            ((WeatherPanel) wp).compact();
+            top.addView(wp, new LinearLayout.LayoutParams(px(280), -2));
+        }
+        ImageView more = iconButton(R.drawable.ic_more, th.dim, 34);
+        more.setOnClickListener(v -> openMenu());
+        top.addView(more, new LinearLayout.LayoutParams(px(34), px(34)));
+        content.addView(top, new LinearLayout.LayoutParams(-1, -2));
+
+        ribbon = new RibbonView(ctx);
+        ribbon.setTheme(th, prefs.googleColors() && !nightActive, prefs.h24(), nightActive);
+        ribbon.setListener(this::openEventSheet);
+        ribbon.setData(ribbonEvents, weather);
+        content.addView(ribbon, margins(-1, 0, 0, 14, 0, 14, 1));
+
+        LinearLayout bottom = new LinearLayout(ctx);
+        bottom.setGravity(Gravity.CENTER_VERTICAL);
+        bottom.addView(buildMusic(), new LinearLayout.LayoutParams(0, -2, 1));
+        List<String[]> fav = favourites(desks);
+        View right;
+        if (SmartHome.configured(prefs) && !fav.isEmpty()) {
+            JSONObject b = new JSONObject();
+            try {
+                org.json.JSONArray items = new org.json.JSONArray();
+                for (String[] f : fav) items.put(new JSONObject().put("id", f[0]).put("n", f[1]));
+                b.put("t", "home").put("title", "").put("items", items);
+            } catch (Exception ignored) {
+                // constant keys
+            }
+            right = buildHome(b);
+            bottom.addView(right, margins(0, px(118), 14, 0, 0, 0, 1.4f));
+        } else {
+            right = buildPc();
+            bottom.addView(right, margins(0, -2, 14, 0, 0, 0, 1.4f));
+        }
+        content.addView(bottom, new LinearLayout.LayoutParams(-1, -2));
+    }
+
+    /** Devices of every smart home block of the profile, for the ribbon's bottom row. */
+    private static List<String[]> favourites(JSONArray desks) {
+        List<String[]> out = new ArrayList<>();
+        Set<String> seen = new HashSet<>();
+        for (int i = 0; i < desks.length(); i++) {
+            JSONArray cols = desks.optJSONObject(i).optJSONArray("cols");
+            for (int j = 0; cols != null && j < cols.length(); j++) {
+                JSONArray bl = cols.optJSONObject(j).optJSONArray("blocks");
+                for (int k = 0; bl != null && k < bl.length(); k++) {
+                    JSONObject b = bl.optJSONObject(k);
+                    if (b == null || !"home".equals(b.optString("t"))) continue;
+                    for (String[] it : Desks.items(b)) if (seen.add(it[0]) && out.size() < 8) out.add(it);
+                }
+            }
+        }
+        return out;
+    }
+
+    /** An event from the ribbon: when, where and the join buttons when it is a call. */
+    private void openEventSheet(CalEvent e) {
+        LinearLayout m = menu(e.title);
+        dayLine(m, "Когда", e.allDay ? "Весь день" : fmt(e.start) + " – " + fmt(e.end));
+        if (!e.location.isEmpty()) dayLine(m, "Где", e.location);
+        if (!e.calendar.isEmpty()) dayLine(m, "Календарь", e.calendar);
+        Meetings.Meeting mt = Meetings.of(e);
+        if (mt != null && e.end > System.currentTimeMillis()) {
+            TextView gap = text(th.dim, 4);
+            m.addView(gap);
+            if (pcOnline) menuRow(m, "Подключиться на ПК · " + mt.platform.name, false, () -> {
+                closeSheet();
+                joinMeeting(mt, true);
+            });
+            menuRow(m, (pcOnline ? "С телефона · " : "Подключиться · ") + mt.platform.name, false, () -> {
+                closeSheet();
+                joinMeeting(mt, false);
+            });
+        }
+        openSheet(m);
+    }
+
+    // ---------------------------------------------------------------- calls without the PC or the calendar
+
+    /** The call notification of Telegram, WhatsApp, Zoom… on this phone; every 2 s. */
+    private void pollPhoneCall() {
+        PhoneCalls.Call c = PhoneCalls.current(ctx);
+        PhoneCalls.Call was = phoneCall;
+        phoneCall = c;
+        boolean changed = (c == null) != (was == null) || c != null && (!c.key.equals(was.key) || c.ringing != was.ringing);
+        if (changed) {
+            callsSig = "";
+            renderCalls();
+        } else if (c != null) {
+            renderCalls(); // the mic or speaker may have been switched in the app itself
+        }
+        callAutomation();
+    }
+
+    /** A meeting link copied anywhere shows up in the calls block; read only when the clipboard changed. */
+    private void checkClipboard() {
+        if (!hasWindowFocus()) return;
+        ClipboardManager cm = ctx.getSystemService(ClipboardManager.class);
+        ClipDescription d = cm == null ? null : cm.getPrimaryClipDescription();
+        long stamp = d == null ? 0 : d.getTimestamp();
+        if (stamp == clipStamp) return;
+        clipStamp = stamp;
+        // Android tells the user each time the clipboard is read: only look at something copied in the last half hour
+        if (d != null && System.currentTimeMillis() - stamp > 30 * 60_000L) d = null;
+        Meetings.Meeting m = null;
+        if (d != null && d.hasMimeType(ClipDescription.MIMETYPE_TEXT_PLAIN) || d != null && d.hasMimeType(ClipDescription.MIMETYPE_TEXT_URILIST)) {
+            try {
+                ClipData cd = cm.getPrimaryClip();
+                CharSequence t = cd == null || cd.getItemCount() == 0 ? null : cd.getItemAt(0).coerceToText(ctx);
+                m = t == null ? null : Meetings.find(t.toString(), null);
+                if (m != null && m.platform == Meetings.WEB) m = null;
+            } catch (RuntimeException ignored) {
+                // no access to the clipboard right now
+            }
+        }
+        if (m != null && clipLink != null && m.url.equals(clipLink.url)) return;
+        clipLink = m;
+        callsSig = "";
+        renderCalls();
+    }
+
+    /** "Звонок по ссылке": a field for a link, recent links, a new meeting in a tap. */
+    private void openQuickJoin() {
+        LinearLayout m = menu("Звонок по ссылке");
+        EditText field = new EditText(ctx);
+        field.setHint("Ссылка Zoom, Meet, Телемоста…");
+        field.setHintTextColor(th.dim);
+        field.setTextColor(th.text);
+        field.setSingleLine();
+        field.setInputType(InputType.TYPE_CLASS_TEXT | InputType.TYPE_TEXT_VARIATION_URI);
+        field.setBackground(rounded(th.bg, 14));
+        field.setPadding(px(14), px(10), px(14), px(10));
+        if (clipLink != null) field.setText(clipLink.url);
+        field.addTextChangedListener(new TextWatcher() {
+            @Override
+            public void beforeTextChanged(CharSequence s, int a, int b, int c) {}
+
+            @Override
+            public void onTextChanged(CharSequence s, int a, int b, int c) {}
+
+            @Override
+            public void afterTextChanged(Editable e) {
+                ui.removeCallbacks(autoCloseSheet);
+                ui.postDelayed(autoCloseSheet, 60_000);
+            }
+        });
+        m.addView(field, margins(-1, -2, 0, 0, 0, 8));
+        LinearLayout btns = new LinearLayout(ctx);
+        TextView phone = pill("С телефона", v -> joinQuick(field.getText().toString(), false));
+        phone.setTextColor(DashTheme.onColor(th.accent));
+        phone.setBackground(rounded(th.accent, 20));
+        btns.addView(phone, margins(-2, -2, 0, 0, 8, 0));
+        if (pcOnline) btns.addView(pill("На компьютере", v -> joinQuick(field.getText().toString(), true)));
+        m.addView(btns, margins(-1, -2, 0, 0, 0, 12));
+        try {
+            JSONArray r = new JSONArray(prefs.callRecent());
+            if (r.length() > 0) m.addView(caption("НЕДАВНИЕ"));
+            for (int i = 0; i < r.length(); i++) {
+                JSONObject o = r.getJSONObject(i);
+                String url = o.optString("url");
+                menuRow(m, o.optString("t") + " · " + url.replaceFirst("^https?://", ""), false,
+                        () -> joinQuick(url, pcOnline && "pc".equals(prefs.callJoin())));
+            }
+        } catch (Exception ignored) {
+            // nothing saved yet
+        }
+        m.addView(caption("НОВАЯ ВСТРЕЧА"));
+        for (String[] n : Meetings.NEW) {
+            menuRow(m, n[0], false, () -> {
+                closeSheet();
+                Meetings.Meeting x = Meetings.find(n[1], n[0]);
+                if (x != null) joinMeeting(x, pcOnline && "pc".equals(prefs.callJoin()));
+            });
+        }
+        openSheet(m);
+    }
+
+    private TextView caption(String s) {
+        TextView t = text(th.dim, 11);
+        t.setText(s);
+        t.setLetterSpacing(0.12f);
+        t.setPadding(px(4), px(8), 0, px(6));
+        return t;
+    }
+
+    private void joinQuick(String text, boolean onPc) {
+        Meetings.Meeting mt = Meetings.find(text, null);
+        if (mt == null) {
+            Toast.makeText(ctx, "Здесь нет ссылки на встречу", Toast.LENGTH_SHORT).show();
+            return;
+        }
+        rememberLink(mt);
+        closeSheet();
+        joinMeeting(mt, onPc);
+    }
+
+    private void rememberLink(Meetings.Meeting mt) {
+        try {
+            JSONArray old = new JSONArray(prefs.callRecent()), out = new JSONArray();
+            out.put(new JSONObject().put("url", mt.url).put("t", mt.platform.name).put("at", System.currentTimeMillis()));
+            for (int i = 0; i < old.length() && out.length() < 6; i++) {
+                JSONObject o = old.getJSONObject(i);
+                if (!o.optString("url").equals(mt.url)) out.put(o);
+            }
+            prefs.setCallRecent(out.toString());
+        } catch (Exception ignored) {
+            // a broken list starts over next time
+        }
+    }
+
+    /** The phone's notification sound when a meeting is about to start. */
+    private void chime() {
+        try {
+            Ringtone r = RingtoneManager.getRingtone(ctx, RingtoneManager.getDefaultUri(RingtoneManager.TYPE_NOTIFICATION));
+            if (r != null) r.play();
+        } catch (RuntimeException ignored) {
+            // no sound available
+        }
+    }
+
+    // ---------------------------------------------------------------- smart home reactions
+
+    /** A call started on the phone or the PC: the chosen lamp or scene on; ended: the lamp off again. */
+    private void callAutomation() {
+        PcClient.Calls pcc = pcOnline ? pcCalls : null;
+        boolean on = phoneCall != null && !phoneCall.ringing || pcc != null && !pcc.calls.isEmpty();
+        if (on == callWasOn) return;
+        callWasOn = on;
+        HomeDevice d = home.devices().get(prefs.autoCall());
+        if (d == null || !d.available) return;
+        if (d.kind == HomeDevice.SCENE) {
+            if (on) homeSend(d, null, () -> home.runScene(d));
+        } else if (on && !d.on) {
+            callLightOn = true;
+            homeSend(d, x -> x.on = true, () -> home.setOn(d, true));
+        } else if (!on && callLightOn) {
+            callLightOn = false;
+            homeSend(d, x -> x.on = false, () -> home.setOn(d, false));
+        }
+    }
+
+    /** The night started: switch off (or run) what was chosen in the settings. */
+    private void nightChanged(boolean night) {
+        peeking = false;
+        if (!night) return;
+        for (String id : prefs.autoNight().split(",")) {
+            HomeDevice d = home.devices().get(id.trim());
+            if (d == null || !d.available) continue;
+            if (d.kind == HomeDevice.SCENE) homeSend(d, null, () -> home.runScene(d));
+            else if (d.canToggle && d.on) homeSend(d, x -> x.on = false, () -> home.setOn(d, false));
+        }
+    }
+
+    /** Sunrise: the chosen lamp goes from 1 % to full over the last minutes before the night ends. */
+    private void dawnTick() {
+        HomeDevice d = home.devices().get(prefs.autoDawn());
+        if (d == null || !d.available || !prefs.nightMode()) {
+            dawnStep = -1;
+            return;
+        }
+        int dur = Math.max(5, prefs.dawnMinutes()), into = Math.floorMod(minuteOfDay() - (prefs.nightEnd() - dur), 1440);
+        if (into >= dur) {
+            dawnStep = -1;
+            return;
+        }
+        int pct = Math.max(1, Math.round(100f * (into + 1) / dur));
+        if (pct == dawnStep) return;
+        dawnStep = pct;
+        if (d.dimmable) {
+            homeSend(d, x -> {
+                x.on = true;
+                x.brightness = pct;
+            }, () -> home.brightness(d, pct));
+        } else if (!d.on) {
+            homeSend(d, x -> x.on = true, () -> home.setOn(d, true));
+        }
+    }
+
     // ---------------------------------------------------------------- helpers
 
     private void applyPadding() {
         if (content == null) return;
-        int base = px(22);
+        int base = "bento".equals(look) || "dock".equals(look) ? px(14) : px(22);
         // the live strip takes the top edge: blocks move down instead of hiding under it
         int top = live != null && live.getVisibility() == VISIBLE ? px(40) : px(16);
         content.setPadding(base + cutL, top + cutT, base + cutR, (hasBar ? px(34) : px(16)) + cutB);

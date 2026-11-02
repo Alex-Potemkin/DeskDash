@@ -29,6 +29,9 @@ public class MainActivity extends Activity {
         if (Presets.needWelcome(this)) {
             // the wizard asks for the calendar itself, together with everything else
             startActivity(new Intent(this, WelcomeActivity.class));
+        } else if (Presets.needTour(this)) {
+            // an update brought looks, weather and the new night: offer to set them up, desks stay
+            startActivity(new Intent(this, WelcomeActivity.class).putExtra(WelcomeActivity.EXTRA_TOUR, true));
         } else if (!"ics".equals(new Prefs(this).calSource()) && !CalendarRepo.hasPermission(this)) {
             requestPermissions(new String[]{Manifest.permission.READ_CALENDAR}, 1);
         }

@@ -21,8 +21,9 @@ import java.util.Locale;
 
 /**
  * The "Созвоны" block. Live call on the PC: who, how long, mic / camera / share / hand / leave and the
- * PC screen on the phone. Otherwise the next call from the calendar with a countdown and "join" buttons,
- * then the rest of the day's calls. Links of every service come from the calendar (Meetings).
+ * PC screen on the phone; a call on the phone itself (Telegram, WhatsApp, Zoom…) with its own buttons.
+ * Otherwise the next call from the calendar with a countdown and "join" buttons, then the rest of the day's
+ * calls, and at the bottom a way in without the calendar or the PC: a link from the clipboard, "by link".
  */
 final class CallPanel extends LinearLayout {
     interface Listener {
@@ -33,6 +34,12 @@ final class CallPanel extends LinearLayout {
         void onScreen();
 
         void onSetup();
+
+        /** A call on this phone: "mute", "speaker", "hangup", "answer", "open". */
+        void onPhone(PhoneCalls.Call c, String action);
+
+        /** "Звонок по ссылке": paste a link, recent links, a new meeting. */
+        void onQuick();
     }
 
     private final DashTheme th;
@@ -93,7 +100,8 @@ final class CallPanel extends LinearLayout {
         for (Runnable r : tickers) r.run();
     }
 
-    void render(List<Meetings.Meeting> today, PcClient.Calls live, boolean pcOnline, boolean canStream, int remindMin) {
+    void render(List<Meetings.Meeting> today, PcClient.Calls live, boolean pcOnline, boolean canStream, int remindMin,
+                PhoneCalls.Call phone, boolean micMuted, boolean speaker, Meetings.Meeting clip) {
         body.removeAllViews();
         tickers.clear();
         long now = System.currentTimeMillis();
@@ -107,11 +115,13 @@ final class CallPanel extends LinearLayout {
             next = m;
             break;
         }
+        if (phone != null) body.addView(phoneCard(phone, micMuted, speaker), lp(0, 8));
         if (call != null) {
             body.addView(liveCard(call, live.micMuted, canStream, matching(today, call)), lp(0, 8));
-        } else if (next != null) {
+        } else if (next != null && phone == null) {
             body.addView(nextCard(next, now, remindMin, pcOnline), lp(0, 8));
         }
+        int quickAt = body.getChildCount(); // the way in by link sits right under the main card, not below the whole list
         boolean first = true;
         for (Meetings.Meeting m : today) {
             if (call == null && m == next) continue;
@@ -124,18 +134,98 @@ final class CallPanel extends LinearLayout {
             }
             body.addView(row(m, now, pcOnline), lp(0, 4));
         }
-        if (call == null && today.isEmpty()) {
+        if (call == null && phone == null && today.isEmpty()) {
             TextView e = text(th.dim, 13);
             e.setGravity(Gravity.CENTER);
             e.setLineSpacing(0, 1.15f);
             e.setPadding(px(14), px(14), px(14), px(14));
             e.setBackground(round(th.surface, 16));
-            e.setText(pcOnline ? "Сегодня созвонов нет.\nZoom, Meet, Teams, Телемост и другие\nпоявятся здесь из календаря"
-                    : "Сегодня созвонов нет.\nЗвонки на ПК видны, когда подключён DeskDash.exe");
-            if (!pcOnline) e.setOnClickListener(v -> listener.onSetup());
+            e.setText("Сегодня созвонов нет.\nВстречи из календаря, звонки на телефоне\nи по ссылке появятся здесь");
             body.addView(e, lp(0, 4));
-            if (canStream) body.addView(chip("Экран ПК на телефоне", th.surface, th.text, v -> listener.onScreen()), lp(8, 0));
         }
+        LinearLayout quick = new LinearLayout(getContext());
+        quick.setGravity(Gravity.CENTER_VERTICAL);
+        if (clip != null && phone == null && call == null) {
+            quick.addView(round("Ссылка " + clip.platform.name + " из буфера · войти", DashTheme.blend(th.surface, clip.platform.color, 0.3f),
+                    th.text, v -> listener.onJoin(clip, pcOnline)), btnLp());
+        }
+        quick.addView(round("+ Звонок по ссылке", th.surface, th.text, v -> listener.onQuick()), btnLp());
+        if (canStream && call == null) quick.addView(round("Экран ПК", th.surface, th.text, v -> listener.onScreen()), btnLp());
+        android.widget.HorizontalScrollView qs = new android.widget.HorizontalScrollView(getContext());
+        qs.setHorizontalScrollBarEnabled(false);
+        qs.addView(quick);
+        if (quickAt == 0) body.addView(qs, lp(8, 0));
+        else body.addView(qs, quickAt, lp(0, 10));
+    }
+
+    /** A call on this phone: who, how long, the app's own buttons plus the system microphone and speaker. */
+    private View phoneCard(PhoneCalls.Call c, boolean muted, boolean speaker) {
+        LinearLayout card = vertical();
+        card.setPadding(px(12), px(10), px(12), px(10));
+        GradientDrawable bg = round(DashTheme.blend(th.surface, c.color, 0.22f), 18);
+        bg.setStroke(px(1.5f), DashTheme.blend(th.surface, c.color, 0.7f));
+        card.setBackground(bg);
+
+        LinearLayout top = new LinearLayout(getContext());
+        top.setGravity(Gravity.CENTER_VERTICAL);
+        top.addView(badge(PhoneCalls.badge(c), c.color, 34), new LayoutParams(px(34), px(34)));
+        LinearLayout names = vertical();
+        TextView title = text(th.text, 15);
+        title.setTypeface(Typeface.create("sans-serif-medium", Typeface.NORMAL));
+        title.setSingleLine();
+        title.setEllipsize(TextUtils.TruncateAt.END);
+        title.setText(c.title.isEmpty() ? c.app : c.title);
+        names.addView(title);
+        TextView sub = text(DashTheme.blend(th.dim, c.color, 0.5f), 12);
+        sub.setSingleLine();
+        sub.setText((c.ringing ? "● Входящий · " : "● На телефоне · ") + c.app);
+        names.addView(sub);
+        LayoutParams nl = new LayoutParams(0, -2, 1);
+        nl.leftMargin = px(12);
+        top.addView(names, nl);
+        if (!c.ringing) {
+            TextView timer = text(th.text, 22);
+            timer.setTypeface(Typeface.create("sans-serif-light", Typeface.NORMAL));
+            Runnable upd = () -> timer.setText(clock((System.currentTimeMillis() - c.since) / 1000));
+            upd.run();
+            tickers.add(upd);
+            top.addView(timer);
+        }
+        card.addView(top);
+
+        LinearLayout btns = new LinearLayout(getContext());
+        if (c.ringing) {
+            btns.addView(round("Ответить", 0xFF34A853, 0xFFFFFFFF, v -> listener.onPhone(c, "answer")), btnLp());
+            if (c.hangup != null) btns.addView(round("Отклонить", 0x33E5534B, 0xFFE5534B, v -> listener.onPhone(c, "hangup")), btnLp());
+        } else {
+            btns.addView(round("Мик " + (muted ? "выкл" : "вкл"), muted ? 0xFFE5534B : th.bg, muted ? 0xFFFFFFFF : th.text,
+                    v -> listener.onPhone(c, "mute")), btnLp());
+            btns.addView(round(speaker ? "Динамик вкл" : "Динамик", speaker ? th.accent : th.bg,
+                    speaker ? DashTheme.onColor(th.accent) : th.text, v -> listener.onPhone(c, "speaker")), btnLp());
+            if (c.open != null) btns.addView(round("Открыть", th.bg, th.text, v -> listener.onPhone(c, "open")), btnLp());
+            if (c.hangup != null) {
+                TextView leave = round("Завершить", 0x33E5534B, 0xFFE5534B, null);
+                leave.setOnClickListener(v -> {
+                    if (!leaveArmed) {
+                        leaveArmed = true;
+                        leave.setText("Точно?");
+                        leave.postDelayed(() -> {
+                            leaveArmed = false;
+                            leave.setText("Завершить");
+                        }, 3000);
+                        return;
+                    }
+                    leaveArmed = false;
+                    listener.onPhone(c, "hangup");
+                });
+                btns.addView(leave, btnLp());
+            }
+        }
+        android.widget.HorizontalScrollView hs = new android.widget.HorizontalScrollView(getContext());
+        hs.setHorizontalScrollBarEnabled(false);
+        hs.addView(btns);
+        card.addView(hs, lp(8, 0));
+        return card;
     }
 
     // ---------------------------------------------------------------- cards

@@ -21,12 +21,21 @@ import android.widget.LinearLayout;
 import android.widget.ScrollView;
 import android.widget.TextView;
 
+import java.util.ArrayList;
 import java.util.HashMap;
+import java.util.LinkedHashSet;
 import java.util.List;
+import java.util.Set;
+import java.util.regex.Matcher;
+import java.util.regex.Pattern;
 import java.util.Locale;
 import java.util.Map;
 
-/** A "Умный дом" block: tiles for the devices picked in the desk editor. */
+/**
+ * A "Умный дом" block: tiles for the devices picked in the desk editor, or (setAuto) every device with
+ * chips to pick a room. The header sums the block up (temperature at home, lights on) and turns
+ * everything in it off with one tap.
+ */
 final class HomePanel extends LinearLayout {
     interface Listener {
         void onTap(HomeDevice d);
@@ -37,17 +46,26 @@ final class HomePanel extends LinearLayout {
 
         /** Camera / printer picture for a tile, null while there is none; may start loading it. */
         Bitmap image(HomeDevice d);
+
+        /** "Выключить всё": the lights, plugs and fans of this block that are on. */
+        void onAllOff(List<HomeDevice> on);
     }
+
+    private static final Pattern DEGREES = Pattern.compile("(-?\\d+(?:[.,]\\d+)?)\\s*°");
 
     private static final int ALERT = 0xFFE5534B;
 
     private final DashTheme th;
     private final float dp;
-    private final List<String[]> items;
+    private List<String[]> items;
     private final Listener listener;
     private final TileGrid grid;
-    private final TextView empty;
+    private final TextView empty, summary, allOff;
     private final Map<String, Tile> tiles = new HashMap<>();
+    private boolean auto;
+    private String room = "";
+    private LinearLayout rooms;
+    private String roomsSig = "", idsSig = "";
 
     HomePanel(Context c, DashTheme th, String title, List<String[]> items, Listener l) {
         super(c);
@@ -57,16 +75,29 @@ final class HomePanel extends LinearLayout {
         dp = c.getResources().getDisplayMetrics().density;
         setOrientation(VERTICAL);
 
-        if (!title.isEmpty()) {
-            TextView t = text(th.dim, 12);
-            t.setText(title.toUpperCase(Locale.getDefault()));
-            t.setLetterSpacing(0.16f);
-            t.setTypeface(Typeface.create("sans-serif-medium", Typeface.NORMAL));
-            t.setSingleLine();
-            LayoutParams lp = new LayoutParams(-1, -2);
-            lp.setMargins(px(4), px(6), 0, px(8));
-            addView(t, lp);
-        }
+        LinearLayout head = new LinearLayout(c);
+        head.setGravity(Gravity.CENTER_VERTICAL);
+        TextView t = text(th.dim, 12);
+        t.setText(title.toUpperCase(Locale.getDefault()));
+        t.setLetterSpacing(0.16f);
+        t.setTypeface(Typeface.create("sans-serif-medium", Typeface.NORMAL));
+        t.setSingleLine();
+        head.addView(t);
+        summary = text(th.dim, 12);
+        summary.setSingleLine();
+        summary.setEllipsize(TextUtils.TruncateAt.END);
+        LayoutParams sl = new LayoutParams(0, -2, 1);
+        sl.leftMargin = title.isEmpty() ? 0 : px(10);
+        head.addView(summary, sl);
+        allOff = text(th.text, 12);
+        allOff.setText("Выключить всё");
+        allOff.setPadding(px(10), px(4), px(10), px(4));
+        allOff.setBackground(rounded(th.surface, 12));
+        allOff.setVisibility(GONE);
+        head.addView(allOff);
+        LayoutParams hl = new LayoutParams(-1, -2);
+        hl.setMargins(px(4), px(2), 0, px(8));
+        addView(head, hl);
 
         ScrollView sv = new ScrollView(c);
         sv.setVerticalScrollBarEnabled(false);
@@ -84,11 +115,120 @@ final class HomePanel extends LinearLayout {
         empty.setVisibility(GONE);
         addView(empty, new LayoutParams(-1, -2));
 
-        for (String[] it : items) {
-            Tile t = new Tile(c, it[0], it[1]);
+        setTiles(items);
+    }
+
+    /** Every device, grouped by room, with room chips above the tiles (the "Дом" section of the dock). */
+    void setAuto() {
+        auto = true;
+        android.widget.HorizontalScrollView hs = new android.widget.HorizontalScrollView(getContext());
+        hs.setHorizontalScrollBarEnabled(false);
+        rooms = new LinearLayout(getContext());
+        hs.addView(rooms);
+        LayoutParams l = new LayoutParams(-1, -2);
+        l.bottomMargin = px(8);
+        addView(hs, 1, l);
+    }
+
+    View roomStrip() {
+        return rooms == null ? null : (View) rooms.getParent();
+    }
+
+    private void setTiles(List<String[]> list) {
+        items = list;
+        grid.removeAllViews();
+        tiles.clear();
+        for (String[] it : list) {
+            Tile t = new Tile(getContext(), it[0], it[1]);
             tiles.put(it[0], t);
             grid.addView(t.root);
         }
+    }
+
+    /** Auto mode: the devices of the chosen room, rooms in their own order, scenes last. */
+    private void autoItems(Map<String, HomeDevice> devs) {
+        Set<String> names = new LinkedHashSet<>();
+        for (HomeDevice d : devs.values()) if (!d.room.isEmpty()) names.add(d.room);
+        if (!names.contains(room)) room = "";
+        String rsig = String.join("|", names) + "#" + room;
+        if (!rsig.equals(roomsSig)) {
+            roomsSig = rsig;
+            rooms.removeAllViews();
+            List<String> all = new ArrayList<>();
+            all.add("");
+            all.addAll(names);
+            for (String r : all) {
+                boolean sel = r.equals(room);
+                TextView chip = text(sel ? DashTheme.onColor(th.accent) : th.text, 13);
+                chip.setText(r.isEmpty() ? "Все" : r);
+                chip.setSingleLine();
+                chip.setPadding(px(12), px(5), px(12), px(5));
+                chip.setBackground(rounded(sel ? th.accent : th.surface, 14));
+                chip.setOnClickListener(v -> {
+                    room = r;
+                    roomsSig = "";
+                    render(devs, true, null);
+                });
+                LayoutParams cl = new LayoutParams(-2, -2);
+                cl.rightMargin = px(6);
+                rooms.addView(chip, cl);
+            }
+            ((View) rooms.getParent()).setVisibility(names.isEmpty() ? GONE : VISIBLE);
+        }
+        List<HomeDevice> list = new ArrayList<>();
+        for (HomeDevice d : devs.values()) if (room.isEmpty() || room.equals(d.room)) list.add(d);
+        List<String> order = new ArrayList<>(names);
+        list.sort((a, b) -> {
+            int sa = a.kind == HomeDevice.SCENE ? 1 : 0, sb = b.kind == HomeDevice.SCENE ? 1 : 0;
+            if (sa != sb) return sa - sb;
+            int ra = order.indexOf(a.room), rb = order.indexOf(b.room);
+            if (ra != rb) return (ra < 0 ? 999 : ra) - (rb < 0 ? 999 : rb);
+            return a.name.compareToIgnoreCase(b.name);
+        });
+        StringBuilder sig = new StringBuilder();
+        List<String[]> next = new ArrayList<>();
+        for (HomeDevice d : list) {
+            sig.append(d.id).append('|');
+            next.add(new String[]{d.id, d.name});
+        }
+        if (!sig.toString().equals(idsSig)) {
+            idsSig = sig.toString();
+            setTiles(next);
+        }
+    }
+
+    /** "22,5° дома · свет: 2" and the all-off button. */
+    private void renderSummary(Map<String, HomeDevice> devs) {
+        List<HomeDevice> on = new ArrayList<>();
+        double sum = 0;
+        int temps = 0, lights = 0;
+        for (String[] it : items) {
+            HomeDevice d = devs.get(it[0]);
+            if (d == null || !d.available) continue;
+            if (d.active() && (d.kind == HomeDevice.LIGHT || d.kind == HomeDevice.SWITCH || d.kind == HomeDevice.FAN)) {
+                on.add(d);
+                if (d.kind == HomeDevice.LIGHT) lights++;
+            }
+            double v = Double.NaN;
+            if (d.kind == HomeDevice.CLIMATE) v = d.current;
+            else if (d.kind == HomeDevice.SENSOR) {
+                Matcher m = DEGREES.matcher(d.state);
+                if (m.find()) v = Double.parseDouble(m.group(1).replace(',', '.'));
+            }
+            if (!Double.isNaN(v)) {
+                sum += v;
+                temps++;
+            }
+        }
+        StringBuilder sb = new StringBuilder();
+        if (temps > 0) sb.append(HomeDevice.deg(Math.round(sum / temps * 10) / 10.0)).append(" дома");
+        if (lights > 0) sb.append(sb.length() > 0 ? " · " : "").append("свет: ").append(lights);
+        summary.setText(sb);
+        allOff.setVisibility(on.isEmpty() ? GONE : VISIBLE);
+        allOff.setOnClickListener(v -> {
+            v.performHapticFeedback(HapticFeedbackConstants.VIRTUAL_KEY);
+            listener.onAllOff(on);
+        });
     }
 
     /** Height for "as tall as the content" blocks: ScrollView with weight would collapse to 0. */
@@ -110,8 +250,11 @@ final class HomePanel extends LinearLayout {
             showEmpty("Подключи Home Assistant или Яндекс\nв настройках → «Умный дом»");
             return;
         }
+        if (auto) autoItems(devs);
+        renderSummary(devs);
         if (items.isEmpty()) {
-            showEmpty("Нажми, чтобы выбрать устройства");
+            if (auto) showEmpty(error != null ? error : "Устройств пока нет");
+            else showEmpty("Нажми, чтобы выбрать устройства");
             return;
         }
         boolean any = false;

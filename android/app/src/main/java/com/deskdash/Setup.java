@@ -2,6 +2,10 @@ package com.deskdash;
 
 import android.app.Activity;
 import android.app.AlertDialog;
+import android.content.Context;
+import android.content.Intent;
+import android.net.nsd.NsdManager;
+import android.net.nsd.NsdServiceInfo;
 import android.text.InputType;
 import android.widget.EditText;
 import android.widget.LinearLayout;
@@ -11,12 +15,13 @@ import org.json.JSONArray;
 import org.json.JSONObject;
 
 import java.util.ArrayList;
+import java.util.Collections;
 import java.util.List;
 
 /**
  * Connecting things in a few taps, shared by the first-start wizard and the settings: find the PC,
- * the hub or a 3D printer on the network, ask only for what can't be found (a token, an access code),
- * check it and save it to the active profile.
+ * the hub, Home Assistant or a 3D printer on the network (or all of them at once), ask only for what
+ * can't be found (a token, an access code), check it and save it to the active profile.
  */
 final class Setup {
     private Setup() {}
@@ -32,13 +37,18 @@ final class Setup {
                     toast(a, "Не найден. DeskDash.exe запущен? Телефон и ПК в одной Wi-Fi сети?");
                     return;
                 }
-                pick(a, "Выбери компьютер", found, r -> ask(a, "Токен из окна DeskDash на ПК «" + r[2] + "»", "", false, token -> {
-                    p.raw().edit().putString("pc_host", r[0]).putInt("pc_port", Integer.parseInt(r[1]))
-                            .putString("pc_token", token).apply();
-                    checkPc(a, p, done);
-                }));
+                pick(a, "Выбери компьютер", found, r -> connectPc(a, p, r, done));
             });
         }).start();
+    }
+
+    /** r: {host, port, name}. */
+    static void connectPc(Activity a, Prefs p, String[] r, Runnable done) {
+        ask(a, "Токен из окна DeskDash на ПК «" + r[2] + "»", "", false, token -> {
+            p.raw().edit().putString("pc_host", r[0]).putInt("pc_port", Integer.parseInt(r[1]))
+                    .putString("pc_token", token).apply();
+            checkPc(a, p, done);
+        });
     }
 
     static void checkPc(Activity a, Prefs p, Runnable done) {
@@ -71,23 +81,168 @@ final class Setup {
                     toast(a, "Хаб не найден. Он запущен? Телефон в той же сети?");
                     return;
                 }
-                pick(a, "Выбери хаб", found, r -> ask(a, "Токен доступа к хабу «" + r[2] + "»", "", false, token -> {
-                    p.raw().edit().putString("hub_url", "8780".equals(r[1]) ? r[0] : r[0] + ":" + r[1])
-                            .putString("hub_token", token).apply();
-                    new Thread(() -> {
-                        String msg;
-                        try {
-                            msg = "Хаб работает: " + new HubClient(p).devices().size() + " плиток";
-                        } catch (Exception e) {
-                            msg = "Ошибка: " + SmartHome.msg(e);
+                pick(a, "Выбери хаб", found, r -> connectHub(a, p, r, done));
+            });
+        }).start();
+    }
+
+    /** r: {address, port, name}. */
+    static void connectHub(Activity a, Prefs p, String[] r, Runnable done) {
+        ask(a, "Токен доступа к хабу «" + r[2] + "»", "", false, token -> {
+            p.raw().edit().putString("hub_url", "8780".equals(r[1]) ? r[0] : r[0] + ":" + r[1])
+                    .putString("hub_token", token).apply();
+            new Thread(() -> {
+                String msg;
+                try {
+                    msg = "Хаб работает: " + new HubClient(p).devices().size() + " плиток";
+                } catch (Exception e) {
+                    msg = "Ошибка: " + SmartHome.msg(e);
+                }
+                String m = msg;
+                a.runOnUiThread(() -> {
+                    Toast.makeText(a, m, Toast.LENGTH_LONG).show();
+                    if (done != null) done.run();
+                });
+            }).start();
+        });
+    }
+
+    // ---------------------------------------------------------------- Home Assistant
+
+    /** Home Assistant announces itself on the network (zeroconf): {"http://ip:8123", "", name}. Background thread. */
+    static List<String[]> discoverHa(Context c, int ms) {
+        List<String[]> out = Collections.synchronizedList(new ArrayList<>());
+        NsdManager nsd = c.getSystemService(NsdManager.class);
+        if (nsd == null) return out;
+        NsdManager.DiscoveryListener dl = new NsdManager.DiscoveryListener() {
+            @Override
+            public void onServiceFound(NsdServiceInfo s) {
+                try {
+                    nsd.resolveService(s, new NsdManager.ResolveListener() {
+                        @Override
+                        public void onServiceResolved(NsdServiceInfo r) {
+                            if (r.getHost() == null) return;
+                            String url = "http://" + r.getHost().getHostAddress() + ":" + r.getPort();
+                            for (String[] x : out) if (x[0].equals(url)) return;
+                            out.add(new String[]{url, "", r.getServiceName()});
                         }
-                        String m = msg;
-                        a.runOnUiThread(() -> {
-                            Toast.makeText(a, m, Toast.LENGTH_LONG).show();
-                            if (done != null) done.run();
-                        });
-                    }).start();
-                }));
+
+                        @Override
+                        public void onResolveFailed(NsdServiceInfo r, int err) {}
+                    });
+                } catch (RuntimeException ignored) {
+                    // one resolve at a time on older Android: the first one is enough
+                }
+            }
+
+            @Override
+            public void onDiscoveryStarted(String type) {}
+
+            @Override
+            public void onServiceLost(NsdServiceInfo s) {}
+
+            @Override
+            public void onDiscoveryStopped(String type) {}
+
+            @Override
+            public void onStartDiscoveryFailed(String type, int err) {}
+
+            @Override
+            public void onStopDiscoveryFailed(String type, int err) {}
+        };
+        try {
+            nsd.discoverServices("_home-assistant._tcp", NsdManager.PROTOCOL_DNS_SD, dl);
+            Thread.sleep(ms);
+        } catch (Exception ignored) {
+            // nothing found
+        } finally {
+            try {
+                nsd.stopServiceDiscovery(dl);
+            } catch (RuntimeException ignored) {
+                // never started
+            }
+        }
+        return new ArrayList<>(out);
+    }
+
+    /** Finds Home Assistant (or asks for the address) and opens its sign-in page. */
+    static void findHa(Activity a, Prefs p) {
+        toast(a, "Ищу Home Assistant…");
+        new Thread(() -> {
+            List<String[]> found = discoverHa(a, 3000);
+            a.runOnUiThread(() -> {
+                if (found.isEmpty()) {
+                    ask(a, "Адрес Home Assistant, как в браузере", p.haUrl().isEmpty() ? "http://" : p.haUrl(), false, url -> {
+                        p.raw().edit().putString("ha_url", url).apply();
+                        loginHa(a);
+                    });
+                    return;
+                }
+                pick(a, "Выбери Home Assistant", found, r -> {
+                    p.raw().edit().putString("ha_url", r[0]).apply();
+                    loginHa(a);
+                });
+            });
+        }).start();
+    }
+
+    private static void loginHa(Activity a) {
+        a.startActivity(new Intent(a, LoginActivity.class).putExtra(LoginActivity.EXTRA_MODE, "ha"));
+    }
+
+    // ---------------------------------------------------------------- everything at once
+
+    /** Looks for the PC, the hub, Home Assistant and Bambu printers together and lists what is there to connect. */
+    static void findAll(Activity a, Prefs p, Runnable done) {
+        toast(a, "Ищу всё в сети… (несколько секунд)");
+        new Thread(() -> {
+            List<String[]> pcs = new ArrayList<>(), hubs = new ArrayList<>(), has = new ArrayList<>(), printers = new ArrayList<>();
+            Thread t1 = new Thread(() -> pcs.addAll(PcClient.discover(1500)));
+            Thread t2 = new Thread(() -> hubs.addAll(HubClient.discover(1500)));
+            Thread t3 = new Thread(() -> has.addAll(discoverHa(a, 3000)));
+            Thread t4 = new Thread(() -> {
+                for (String[] r : Bambu.discover(a, 3500)) printers.add(new String[]{r[0], r[1], r[2], ""});
+            });
+            for (Thread t : new Thread[]{t1, t2, t3, t4}) t.start();
+            for (Thread t : new Thread[]{t1, t2, t3, t4}) {
+                try {
+                    t.join(8000);
+                } catch (InterruptedException ignored) {
+                    // show what there is
+                }
+            }
+            a.runOnUiThread(() -> {
+                List<String> names = new ArrayList<>();
+                List<Runnable> acts = new ArrayList<>();
+                for (String[] r : pcs) {
+                    names.add("Компьютер «" + r[2] + "» — подключить");
+                    acts.add(() -> connectPc(a, p, r, done));
+                }
+                for (String[] r : hubs) {
+                    names.add("Хаб «" + r[2] + "» — подключить");
+                    acts.add(() -> connectHub(a, p, r, done));
+                }
+                for (String[] r : has) {
+                    names.add("Home Assistant (" + r[0].replace("http://", "") + ") — войти");
+                    acts.add(() -> {
+                        p.raw().edit().putString("ha_url", r[0]).apply();
+                        loginHa(a);
+                    });
+                }
+                for (String[] r : printers) {
+                    names.add("Принтер «" + r[2] + "» — добавить");
+                    acts.add(() -> printerForm(a, p, r, done));
+                }
+                if (names.isEmpty()) {
+                    new AlertDialog.Builder(a).setTitle("Ничего не нашлось")
+                            .setMessage("Телефон в той же Wi-Fi сети? На ПК должен быть запущен DeskDash.exe. "
+                                    + "Всё можно подключить и вручную в Настройках.")
+                            .setPositiveButton("OK", null).show();
+                    return;
+                }
+                new AlertDialog.Builder(a).setTitle("Нашлось в сети")
+                        .setItems(names.toArray(new String[0]), (d, i) -> acts.get(i).run())
+                        .setNegativeButton("Закрыть", null).show();
             });
         }).start();
     }

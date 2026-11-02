@@ -43,19 +43,53 @@ public final class DashTheme {
             new DashTheme("night", "Ночь", 0xFF000000, 0xFF0A0303, 0xFFB3261E, 0xFF5E1712, 0xFF1A0706,
                     0xFFD13A2F, 0xFFFF3B30, false,
                     0xFF3A0E0B, 0xFF4F1410, 0xFF2A0907, 0xFF611A14, 0xFF451210, 0xFF330C0A, 0xFF571713, 0xFF6B1E17),
+            new DashTheme("night_amber", "Ночь · янтарь", 0xFF000000, 0xFF0B0702, 0xFFB7791F, 0xFF5C3D10, 0xFF1A1105,
+                    0xFFD08A25, 0xFFE0662B, false,
+                    0xFF3A2708, 0xFF4F350C, 0xFF2A1C06, 0xFF61420F, 0xFF45300B, 0xFF332307, 0xFF573B0D, 0xFF6B4912),
+            new DashTheme("night_gray", "Ночь · серый", 0xFF000000, 0xFF080808, 0xFF8C8C8C, 0xFF4A4A4A, 0xFF161616,
+                    0xFFA6A6A6, 0xFFB0B0B0, false,
+                    0xFF262626, 0xFF333333, 0xFF1E1E1E, 0xFF404040, 0xFF2C2C2C, 0xFF222222, 0xFF383838, 0xFF4A4A4A),
     };
+
+    /** Night palettes by tint: "red", "amber", "gray". */
+    public static DashTheme night(String tint) {
+        if ("amber".equals(tint)) return byId("night_amber");
+        if ("gray".equals(tint)) return byId("night_gray");
+        return byId("night");
+    }
+
+    public boolean isNight() {
+        return id.startsWith("night");
+    }
+
+    /** The same theme at night: dark background, everything else much quieter. Light themes turn into their dark twin. */
+    public DashTheme dimmed() {
+        DashTheme b = light ? byId("mocha") : this;
+        float k = 0.5f;
+        int[] ev = new int[b.events.length];
+        for (int i = 0; i < ev.length; i++) ev[i] = blend(b.events[i], 0xFF000000, k);
+        return new DashTheme(b.id + "_dim", b.name, 0xFF000000, blend(b.surface, 0xFF000000, 0.55f), blend(b.text, 0xFF000000, k),
+                blend(b.dim, 0xFF000000, k), blend(b.line, 0xFF000000, 0.4f), blend(b.accent, 0xFF000000, k),
+                blend(b.now, 0xFF000000, 0.4f), false, ev);
+    }
+
+    /** One step brighter surfaces, for things that sit on a card of the original surface colour (the "Плитки" look). */
+    public DashTheme lifted() {
+        return new DashTheme(id, name, bg, blend(surface, text, light ? 0.05f : 0.07f), text, dim,
+                blend(line, text, 0.05f), accent, now, light, events);
+    }
 
     public static DashTheme byId(String id) {
         for (DashTheme t : ALL) if (t.id.equals(id)) return t;
         return ALL[0];
     }
 
-    /** Next theme for the double-tap cycle; the night theme is only used automatically. */
+    /** Next theme for the double-tap cycle; the night themes are only used automatically. */
     public static DashTheme next(String id) {
         int i = 0;
         for (; i < ALL.length; i++) if (ALL[i].id.equals(id)) break;
         DashTheme n = ALL[(i + 1) % ALL.length];
-        return n.id.equals("night") ? ALL[0] : n;
+        return n.isNight() ? ALL[0] : n;
     }
 
     public int eventColor(int googleColor, String key, boolean useGoogle) {
