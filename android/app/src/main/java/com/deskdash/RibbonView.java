@@ -117,22 +117,28 @@ final class RibbonView extends View {
             int color = th.eventColor(e.color, e.title, googleColors);
             boolean past = e.end <= now;
             RectF r = new RectF(x0 + 1.5f * dp, y0, x1 - 1.5f * dp, y1);
-            p.setColor(past ? DashTheme.blend(color, th.bg, 0.55f) : color);
-            c.drawRoundRect(r, 10 * dp, 10 * dp, p);
-            if (m != null) {
-                p.setColor(m.platform.color | 0xFF000000);
-                c.drawRoundRect(new RectF(r.left, r.top, r.left + 5 * dp, r.bottom), 3 * dp, 3 * dp, p);
-            }
+            p.setColor(TimelineView.eventFill(th, m != null ? m.platform.color | 0xFF000000 : color, e.start <= now && now < e.end));
+            p.setAlpha(past ? 130 : 255);
+            c.drawRoundRect(r, 8 * dp, 8 * dp, p);
+            c.save();
+            c.clipRect(r.left, r.top, r.left + 4 * dp, r.bottom);
+            p.setColor(m != null ? m.platform.color | 0xFF000000 : color);
+            p.setAlpha(past ? 130 : 255);
+            c.drawRoundRect(r, 8 * dp, 8 * dp, p);
+            c.restore();
+            p.setAlpha(255);
             hits.add(new Object[]{r, e});
             float tw = r.width() - 16 * dp;
             if (tw > 18 * dp) {
-                int fg = DashTheme.onColor(color);
+                int fg = TimelineView.eventText(th, m != null ? m.platform.color | 0xFF000000 : color);
                 tp.setColor(past ? DashTheme.blend(fg, th.bg, 0.4f) : fg);
+                tp.setTypeface(Ui.font(600));
                 tp.setTextSize(13 * dp);
                 CharSequence title = TextUtils.ellipsize(e.title, tp, tw, TextUtils.TruncateAt.END);
                 c.drawText(title, 0, title.length(), r.left + 10 * dp, r.top + 18 * dp, tp);
                 if (r.height() > 36 * dp) {
                     tp.setTextSize(11 * dp);
+                    tp.setTypeface(Ui.font(400));
                     tp.setAlpha(190);
                     String sub = time(e.start, false) + "–" + time(e.end, false) + (m != null ? " · " + m.platform.name : "");
                     CharSequence s2 = TextUtils.ellipsize(sub, tp, tw, TextUtils.TruncateAt.END);

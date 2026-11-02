@@ -30,12 +30,12 @@
             android:name=".SettingsActivity"
             android:exported="true"
             android:label="Настройки"
-            android:theme="@style/Settings" />
+            android:theme="@style/Ios" />
 
         <activity
             android:name=".DeskEditorActivity"
             android:exported="false"
-            android:label="Столы"
+            android:label="Столы и блоки"
             android:theme="@style/Settings" />
 
         <activity

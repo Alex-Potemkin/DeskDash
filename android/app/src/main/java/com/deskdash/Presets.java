@@ -40,17 +40,17 @@ final class Presets {
 
     static final Preset[] ALL = {
             new Preset("work", "Рабочий стол", "Часы, созвоны, ПК и календарь. Второй стол — статистика дня",
-                    R.drawable.ic_desktop, "mocha", "digital"),
+                    R.drawable.ic_desktop, "dark", "digital"),
             new Preset("calls", "Созвоны", "Ближайшие встречи из всех сервисов, кнопки звонка и экран ПК на телефоне",
-                    R.drawable.ic_camera, "ocean", "digital"),
+                    R.drawable.ic_camera, "midnight", "digital"),
             new Preset("home", "Умный дом", "Свет, климат, принтер и датчики крупными плитками, часы и музыка рядом",
-                    R.drawable.ic_home, "sage", "stacked"),
+                    R.drawable.ic_home, "light", "stacked"),
             new Preset("minimal", "Минимализм", "Большие часы и музыка, больше ничего",
-                    R.drawable.ic_eye_off, "amoled", "flip"),
+                    R.drawable.ic_eye_off, "dark", "flip"),
             new Preset("bedside", "У кровати", "Часы, календарь на завтра и свет в спальне, мягкая ночная тема",
-                    R.drawable.ic_night, "latte", "analog"),
+                    R.drawable.ic_night, "sand", "analog"),
             new Preset("classic", "Как раньше", "Часы, музыка и ПК слева, календарь справа",
-                    R.drawable.ic_dashboard, "mocha", "digital"),
+                    R.drawable.ic_dashboard, "dark", "digital"),
     };
 
     private Presets() {}
@@ -152,10 +152,10 @@ final class Presets {
 
     // ---------------------------------------------------------------- previews
 
-    /** What a look ("classic", "bento", "focus", "dock", "ribbon") looks like, in a theme. */
+    /** What a look ("bento", "standby", "dock", "ribbon") looks like, in a theme. */
     static final class LookPreview extends View {
         private final Paint p = new Paint(Paint.ANTI_ALIAS_FLAG);
-        private String look = "classic";
+        private String look = "bento";
         private DashTheme th = DashTheme.ALL[0];
 
         LookPreview(Context c) {
@@ -188,12 +188,28 @@ final class Presets {
                         box(c, x, h * 0.5f + 4 * d, x + tw, h - pad, i == 0 ? DashTheme.blend(card, th.accent, 0.4f) : card, r);
                     }
                     break;
-                case "focus":
-                    clock(c, w / 2, h * 0.5f, h * 0.32f);
-                    p.setColor(card);
-                    c.drawRoundRect(w / 2 - 34 * d, h * 0.68f, w / 2 - 3 * d, h * 0.68f + 9 * d, 5 * d, 5 * d, p);
-                    c.drawRoundRect(w / 2 + 3 * d, h * 0.68f, w / 2 + 34 * d, h * 0.68f + 9 * d, 5 * d, 5 * d, p);
+                case "standby": {
+                    box(c, pad, pad, w / 2 - 2 * d, h - pad, card, r);
+                    clock(c, (pad + w / 2) / 2, h * 0.5f, h * 0.26f);
+                    // a weather widget with its sky, and the stack's dots
+                    android.graphics.LinearGradient sky = new android.graphics.LinearGradient(0, pad, 0, h - pad,
+                            0xFF2E7BD6, 0xFF6FB1EA, android.graphics.Shader.TileMode.CLAMP);
+                    p.setShader(sky);
+                    c.drawRoundRect(w / 2 + 2 * d, pad, w - pad, h - pad, r, r, p);
+                    p.setShader(null);
+                    p.setColor(0xFFFFD60A);
+                    c.drawCircle(w / 2 + 16 * d, pad + 14 * d, 6 * d, p);
+                    p.setColor(0xFFFFFFFF);
+                    p.setTextSize(h * 0.22f);
+                    p.setTextAlign(Paint.Align.LEFT);
+                    c.drawText("+14°", w / 2 + 9 * d, h * 0.68f, p);
+                    p.setTextAlign(Paint.Align.CENTER);
+                    for (int i = 0; i < 3; i++) {
+                        p.setColor(i == 0 ? 0xFFFFFFFF : 0x80FFFFFF);
+                        c.drawCircle(w - pad - 5 * d, h / 2 + (i - 1) * 6 * d, 1.6f * d, p);
+                    }
                     break;
+                }
                 case "dock":
                     box(c, pad, pad, pad + 13 * d, h - pad, card, r);
                     for (int i = 0; i < 5; i++) {
@@ -222,11 +238,11 @@ final class Presets {
                     break;
                 }
                 default:
-                    clock(c, w * 0.25f, h * 0.38f, h * 0.24f);
-                    box(c, pad, h * 0.62f, w * 0.48f, h * 0.78f, card, r);
-                    p.setColor(line);
-                    c.drawRect(w * 0.52f, pad, w * 0.52f + d, h - pad, p);
-                    lines(c, w * 0.56f, pad + 3 * d, w - pad, 4, d);
+                    box(c, pad, pad, w * 0.42f, h * 0.55f, card, r);
+                    clock(c, pad + (w * 0.42f - pad) / 2, pad + h * 0.3f, h * 0.2f);
+                    box(c, pad, h * 0.55f + 4 * d, w * 0.42f, h - pad, card, r);
+                    box(c, w * 0.42f + 4 * d, pad, w - pad, h - pad, card, r);
+                    lines(c, w * 0.42f + 10 * d, pad + 7 * d, w - pad - 6 * d, 4, d);
                     break;
             }
         }
@@ -238,16 +254,20 @@ final class Presets {
 
         private void clock(Canvas c, float cx, float cy, float size) {
             p.setColor(th.text);
+            p.setTypeface(Ui.font(600));
             p.setTextSize(size);
             c.drawText("12:30", cx, cy + size * 0.35f, p);
         }
 
-        /** Calendar-like events. */
+        /** Calendar-like events: a faint fill with a solid bar on the left. */
         private void lines(Canvas c, float l, float t, float r, int n, float d) {
             for (int i = 0; i < n; i++) {
-                p.setColor(th.events[i % th.events.length]);
-                float y = t + i * 9 * d;
-                c.drawRoundRect(l, y, l + (r - l) * (i % 2 == 0 ? 0.9f : 0.6f), y + 6 * d, 2 * d, 2 * d, p);
+                int col = th.events[i % th.events.length];
+                float y = t + i * 10 * d, right = l + (r - l) * (i % 2 == 0 ? 0.9f : 0.6f);
+                p.setColor(TimelineView.eventFill(th, col, false));
+                c.drawRoundRect(l, y, right, y + 7 * d, 2 * d, 2 * d, p);
+                p.setColor(col);
+                c.drawRect(l, y, l + 1.5f * d, y + 7 * d, p);
             }
         }
     }

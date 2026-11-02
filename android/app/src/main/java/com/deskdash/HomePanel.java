@@ -32,7 +32,8 @@ import java.util.Locale;
 import java.util.Map;
 
 /**
- * A "Умный дом" block: tiles for the devices picked in the desk editor, or (setAuto) every device with
+ * A "Умный дом" block, after Apple's Home app: wide tiles with a round icon, dark while off and light
+ * with a coloured icon while on. The devices picked in the desk editor, or (setAuto) every device with
  * chips to pick a room. The header sums the block up (temperature at home, lights on) and turns
  * everything in it off with one tap.
  */
@@ -75,28 +76,16 @@ final class HomePanel extends LinearLayout {
         dp = c.getResources().getDisplayMetrics().density;
         setOrientation(VERTICAL);
 
-        LinearLayout head = new LinearLayout(c);
-        head.setGravity(Gravity.CENTER_VERTICAL);
-        TextView t = text(th.dim, 12);
-        t.setText(title.toUpperCase(Locale.getDefault()));
-        t.setLetterSpacing(0.16f);
-        t.setTypeface(Typeface.create("sans-serif-medium", Typeface.NORMAL));
-        t.setSingleLine();
-        head.addView(t);
-        summary = text(th.dim, 12);
-        summary.setSingleLine();
-        summary.setEllipsize(TextUtils.TruncateAt.END);
-        LayoutParams sl = new LayoutParams(0, -2, 1);
-        sl.leftMargin = title.isEmpty() ? 0 : px(10);
-        head.addView(summary, sl);
-        allOff = text(th.text, 12);
-        allOff.setText("Выключить всё");
-        allOff.setPadding(px(10), px(4), px(10), px(4));
-        allOff.setBackground(rounded(th.surface, 12));
+        summary = new TextView(c);
+        LinearLayout head = Ui.header(c, th, R.drawable.ic_home, th.isNight() ? th.accent : Ui.ORANGE,
+                title.isEmpty() ? "Дом" : title, summary);
+        allOff = Ui.pill(c, "Выключить всё", Ui.fill(th), th.accent, null);
+        allOff.setTextSize(TypedValue.COMPLEX_UNIT_SP, 13);
+        allOff.setPadding(px(12), px(5), px(12), px(5));
         allOff.setVisibility(GONE);
         head.addView(allOff);
         LayoutParams hl = new LayoutParams(-1, -2);
-        hl.setMargins(px(4), px(2), 0, px(8));
+        hl.setMargins(0, 0, 0, px(10));
         addView(head, hl);
 
         ScrollView sv = new ScrollView(c);
@@ -104,14 +93,14 @@ final class HomePanel extends LinearLayout {
         sv.setOverScrollMode(OVER_SCROLL_NEVER);
         sv.setVerticalFadingEdgeEnabled(true);
         sv.setFadingEdgeLength(px(20));
-        grid = new TileGrid(c, px(108), px(78), px(8));
+        grid = new TileGrid(c, px(150), px(64), px(8));
         sv.addView(grid, new ScrollView.LayoutParams(-1, -2));
         addView(sv, new LayoutParams(-1, 0, 1));
 
-        empty = text(th.dim, 14);
+        empty = text(th.dim, 15);
         empty.setGravity(Gravity.CENTER);
-        empty.setPadding(px(16), px(12), px(16), px(12));
-        empty.setBackground(rounded(th.surface, 16));
+        empty.setPadding(px(16), px(14), px(16), px(14));
+        empty.setBackground(rounded(Ui.fill(th), Ui.R_TILE));
         empty.setVisibility(GONE);
         addView(empty, new LayoutParams(-1, -2));
 
@@ -159,11 +148,12 @@ final class HomePanel extends LinearLayout {
             all.addAll(names);
             for (String r : all) {
                 boolean sel = r.equals(room);
-                TextView chip = text(sel ? DashTheme.onColor(th.accent) : th.text, 13);
+                TextView chip = text(sel ? (th.light ? 0xFFFFFFFF : 0xFF000000) : th.text, 14);
+                chip.setTypeface(Ui.font(600));
                 chip.setText(r.isEmpty() ? "Все" : r);
                 chip.setSingleLine();
-                chip.setPadding(px(12), px(5), px(12), px(5));
-                chip.setBackground(rounded(sel ? th.accent : th.surface, 14));
+                chip.setPadding(px(14), px(6), px(14), px(6));
+                chip.setBackground(rounded(sel ? th.text : Ui.fill(th), 100));
                 chip.setOnClickListener(v -> {
                     room = r;
                     roomsSig = "";
@@ -278,6 +268,7 @@ final class HomePanel extends LinearLayout {
     private final class Tile {
         final FrameLayout root;
         final LinearLayout box;
+        final FrameLayout bubble;
         final ImageView icon, pic;
         final View scrim;
         final TextView name, status;
@@ -289,7 +280,7 @@ final class HomePanel extends LinearLayout {
             root.setOutlineProvider(new ViewOutlineProvider() {
                 @Override
                 public void getOutline(View v, Outline o) {
-                    o.setRoundRect(0, 0, v.getWidth(), v.getHeight(), 16 * dp);
+                    o.setRoundRect(0, 0, v.getWidth(), v.getHeight(), Ui.R_TILE * dp);
                 }
             });
             root.setClipToOutline(true);
@@ -299,33 +290,39 @@ final class HomePanel extends LinearLayout {
             root.addView(pic, new FrameLayout.LayoutParams(-1, -1));
             scrim = new View(c);
             scrim.setBackground(new android.graphics.drawable.GradientDrawable(
-                    android.graphics.drawable.GradientDrawable.Orientation.TOP_BOTTOM, new int[]{0x00000000, 0xB0000000}));
+                    android.graphics.drawable.GradientDrawable.Orientation.LEFT_RIGHT, new int[]{0xB0000000, 0x30000000}));
             scrim.setVisibility(GONE);
             root.addView(scrim, new FrameLayout.LayoutParams(-1, -1));
             box = new LinearLayout(c);
-            box.setOrientation(VERTICAL);
-            box.setPadding(px(12), px(10), px(10), px(8));
+            box.setGravity(Gravity.CENTER_VERTICAL);
+            box.setPadding(px(10), 0, px(10), 0);
             root.addView(box, new FrameLayout.LayoutParams(-1, -1));
+            // the round icon on the left, as in Apple's Home
+            bubble = new FrameLayout(c);
             icon = new ImageView(c);
-            box.addView(icon, new LayoutParams(px(22), px(22)));
-            name = text(th.text, 13);
+            bubble.addView(icon, new FrameLayout.LayoutParams(px(19), px(19), Gravity.CENTER));
+            box.addView(bubble, new LayoutParams(px(38), px(38)));
+            LinearLayout words = new LinearLayout(c);
+            words.setOrientation(VERTICAL);
+            name = text(th.text, 14);
+            name.setTypeface(Ui.font(600));
             name.setMaxLines(1);
             name.setEllipsize(TextUtils.TruncateAt.END);
             name.setText(savedName.isEmpty() ? id : savedName);
-            LayoutParams nl = new LayoutParams(-1, 0, 1);
-            nl.topMargin = px(4);
-            name.setGravity(Gravity.BOTTOM);
-            box.addView(name, nl);
-            status = text(th.dim, 11);
+            words.addView(name);
+            status = text(th.dim, 12);
             status.setSingleLine();
             status.setEllipsize(TextUtils.TruncateAt.END);
             status.setText("…");
-            box.addView(status, new LayoutParams(-1, -2));
+            words.addView(status);
             bar = new Progress(c);
             bar.setVisibility(GONE);
             LayoutParams bl = new LayoutParams(-1, px(3));
             bl.topMargin = px(4);
-            box.addView(bar, bl);
+            words.addView(bar, bl);
+            LayoutParams wl = new LayoutParams(0, -2, 1);
+            wl.leftMargin = px(10);
+            box.addView(words, wl);
             root.setOnClickListener(v -> {
                 if (dev == null) return;
                 v.performHapticFeedback(HapticFeedbackConstants.VIRTUAL_KEY);
@@ -344,19 +341,28 @@ final class HomePanel extends LinearLayout {
             dev = d;
             boolean lit = d != null && d.active();
             boolean alert = d != null && d.alert;
-            int bg = alert ? DashTheme.blend(th.surface, ALERT, 0.45f)
-                    : lit ? DashTheme.blend(th.surface, th.accent, th.light ? 0.30f : 0.38f) : th.surface;
-            root.setBackground(rounded(bg, 16));
+            int kc = th.isNight() ? th.accent : kindColor(d);
+            int bg;
+            if (alert) bg = th.isNight() ? DashTheme.blend(th.surface, th.accent, 0.4f) : Ui.RED;
+            else if (lit) bg = th.isNight() ? DashTheme.blend(th.surface, th.accent, 0.3f)
+                    : th.light ? DashTheme.blend(0xFFFFFFFF, kc, 0.22f) : 0xFFF2F2F7;
+            else bg = Ui.fill(th);
+            root.setBackground(rounded(bg, Ui.R_TILE));
             root.setAlpha(d == null || !d.available ? 0.45f : 1f);
             Bitmap img = d != null && !d.image.isEmpty() ? listener.image(d) : null;
             boolean photo = img != null;
             pic.setVisibility(photo ? VISIBLE : GONE);
             scrim.setVisibility(photo ? VISIBLE : GONE);
             if (photo) pic.setImageBitmap(img);
-            int fg = photo ? 0xFFFFFFFF : lit || alert ? DashTheme.onColor(bg) : th.text;
+            int fg = photo || alert ? 0xFFFFFFFF : lit && !th.isNight() ? 0xFF000000 : th.text;
             icon.setImageResource(iconFor(d));
-            int ic = photo ? 0xFFFFFFFF : alert ? DashTheme.onColor(bg) : lit ? th.accent : th.dim;
-            if (lit && !photo && DashTheme.onColor(bg) != DashTheme.onColor(th.accent)) ic = DashTheme.onColor(bg);
+            GradientDrawable ring = new GradientDrawable();
+            ring.setShape(GradientDrawable.OVAL);
+            if (photo || alert) ring.setColor(0x40FFFFFF);
+            else if (lit) ring.setColor(kc);
+            else ring.setColor(DashTheme.blend(Ui.fill(th), th.text, th.light ? 0.08f : 0.12f));
+            bubble.setBackground(ring);
+            int ic = photo || alert ? 0xFFFFFFFF : lit ? DashTheme.onColor(kc) : th.dim;
             icon.setImageTintList(ColorStateList.valueOf(ic));
             if (d != null) {
                 name.setText(d.name);
@@ -365,10 +371,28 @@ final class HomePanel extends LinearLayout {
                 status.setText("…");
             }
             name.setTextColor(fg);
-            status.setTextColor(photo ? 0xD9FFFFFF : lit || alert ? DashTheme.blend(fg, bg, 0.3f) : th.dim);
+            status.setTextColor(photo || alert ? 0xD9FFFFFF : lit && !th.isNight() ? 0x99000000 : th.dim);
             boolean job = d != null && d.progress >= 0 && d.on;
             bar.setVisibility(job ? VISIBLE : GONE);
-            if (job) bar.set(d.progress / 100f, photo ? 0x55FFFFFF : DashTheme.blend(bg, fg, 0.2f), photo ? 0xFFFFFFFF : th.accent);
+            if (job) bar.set(d.progress / 100f, photo ? 0x55FFFFFF : DashTheme.blend(bg, fg, 0.15f), photo ? 0xFFFFFFFF : kc);
+        }
+    }
+
+    /** The colour of a kind of device when it is on: yellow lamps, orange heat, blue blinds… */
+    private static int kindColor(HomeDevice d) {
+        if (d == null) return Ui.ORANGE;
+        switch (d.kind) {
+            case HomeDevice.LIGHT: return Ui.YELLOW;
+            case HomeDevice.CLIMATE: return Ui.ORANGE;
+            case HomeDevice.COVER: return Ui.CYAN;
+            case HomeDevice.LOCK: return Ui.TEAL;
+            case HomeDevice.SCENE: return Ui.INDIGO;
+            case HomeDevice.FAN: return Ui.MINT;
+            case HomeDevice.MEDIA: return Ui.PINK;
+            case HomeDevice.PRINTER: return Ui.GREEN;
+            case HomeDevice.VACUUM: return Ui.TEAL;
+            case HomeDevice.APPLIANCE: return Ui.BLUE;
+            default: return Ui.GREEN;
         }
     }
 

@@ -20,9 +20,9 @@ public class Prefs {
         return raw();
     }
 
-    public String theme() { return sp().getString("theme", "mocha"); }
+    public String theme() { return DashTheme.byId(sp().getString("theme", "dark")).id; }
     public void setTheme(String id) { sp().edit().putString("theme", id).apply(); }
-    public String clockFont() { return sp().getString("clock_font", "thin"); }
+    public String clockFont() { return sp().getString("clock_font", "apple"); }
     public String clockStyle() { return sp().getString("clock_style", "digital"); }
     public void setClockStyle(String id) { sp().edit().putString("clock_style", id).apply(); }
     /** Window brightness 0..1 chosen by the edge swipe, -1 = follow the system. */
@@ -46,10 +46,16 @@ public class Prefs {
     public String pcMacros() { return sp().getString("pc_macros", "[]"); }
     public void setPcMacros(String json) { sp().edit().putString("pc_macros", json).apply(); }
 
-    /** "classic" (columns), "bento" (cards), "focus" (big clock, desks on tap), "dock" (sections on a side rail),
-     *  "ribbon" (the day as a strip). */
-    public String uiStyle() { return sp().getString("ui_style", "classic"); }
+    /** "bento" (widgets), "standby" (a big clock and a stack of widgets you swipe), "dock" (sections on a side
+     *  rail), "ribbon" (the day as a strip). */
+    public String uiStyle() {
+        // the flat columns and the old focus screen became the widgets and StandBy
+        String s = sp().getString("ui_style", "bento");
+        return "classic".equals(s) ? "bento" : "focus".equals(s) ? "standby" : s;
+    }
     public void setUiStyle(String id) { sp().edit().putString("ui_style", id).apply(); }
+    public int standbyIndex() { return sp().getInt("standby_idx", 0); }
+    public void setStandbyIndex(int i) { sp().edit().putInt("standby_idx", i).apply(); }
     public String dockPage() { return sp().getString("dock_page", "main"); }
     public void setDockPage(String id) { sp().edit().putString("dock_page", id).apply(); }
 

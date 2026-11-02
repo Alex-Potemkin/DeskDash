@@ -51,12 +51,12 @@ public class TimelineView extends View {
         ring.setStyle(Paint.Style.STROKE);
         ring.setStrokeWidth(2 * dp);
         nowP.setStrokeWidth(2 * dp);
-        label.setTextSize(11 * dp);
+        label.setTextSize(12 * dp);
         label.setTextAlign(Paint.Align.RIGHT);
-        label.setTypeface(Typeface.create("sans-serif-light", Typeface.NORMAL));
-        title.setTextSize(12.5f * dp);
-        title.setTypeface(Typeface.create("sans-serif-medium", Typeface.NORMAL));
-        sub.setTextSize(11 * dp);
+        label.setTypeface(Ui.font(500));
+        title.setTextSize(13.5f * dp);
+        title.setTypeface(Ui.font(600));
+        sub.setTextSize(12 * dp);
     }
 
     public void setTheme(DashTheme t, boolean useGoogleColors, boolean h24) {
@@ -68,6 +68,18 @@ public class TimelineView extends View {
         ring.setColor(t.accent);
         nowP.setColor(t.now);
         invalidate();
+    }
+
+    /** Event fill as in Apple's Calendar: the event's colour, faint, on the widget. */
+    static int eventFill(DashTheme th, int color, boolean now) {
+        float k = th.light ? (now ? 0.30f : 0.18f) : (now ? 0.45f : 0.30f);
+        return DashTheme.blend(th.surface, color, k);
+    }
+
+    /** Text of an event: its own colour, darker on light themes and lighter on dark ones. */
+    static int eventText(DashTheme th, int color) {
+        if (th.isNight()) return th.text;
+        return th.light ? DashTheme.blend(color, 0xFF000000, 0.45f) : DashTheme.blend(color, 0xFFFFFFFF, 0.55f);
     }
 
     public void setOnEventTap(OnEventTap t) {
@@ -154,24 +166,31 @@ public class TimelineView extends View {
         for (int h = 0; h <= 24; h++) {
             float y = topPad + h * hourH;
             c.drawLine(gutter, y, getWidth(), y, grid);
-            if (h < 24) c.drawText(String.format("%02d", h), gutter - 8 * dp, y + label.getTextSize() * 0.36f, label);
+            if (h < 24) c.drawText(String.format("%d", h), gutter - 8 * dp, y + label.getTextSize() * 0.36f, label);
         }
-        float r = 7 * dp, pad = 7 * dp;
+        float r = 6 * dp, pad = 9 * dp;
         for (int k = 0; k < rects.size(); k++) {
             CalEvent e = events.get(k);
             RectF rc = rects.get(k);
             int color = th.eventColor(e.color, e.title, googleColors);
-            int alpha = e.end <= now ? 120 : 255;
+            boolean cur = e.start <= now && now < e.end;
+            int alpha = e.end <= now ? 130 : 255;
+            fill.setColor(eventFill(th, color, cur));
+            fill.setAlpha(alpha);
+            c.drawRoundRect(rc, r, r, fill);
+            // the solid bar on the left edge, as in Apple's Calendar
+            c.save();
+            c.clipRect(rc.left, rc.top, rc.left + 4 * dp, rc.bottom);
             fill.setColor(color);
             fill.setAlpha(alpha);
             c.drawRoundRect(rc, r, r, fill);
-            if (e.start <= now && now < e.end) c.drawRoundRect(rc, r, r, ring);
+            c.restore();
 
-            int on = DashTheme.onColor(color);
+            int on = eventText(th, color);
             title.setColor(on);
             title.setAlpha(alpha);
             sub.setColor(on);
-            sub.setAlpha(alpha * 190 / 255);
+            sub.setAlpha(alpha * 200 / 255);
             float avail = rc.width() - 2 * pad;
             if (avail <= 0) continue;
             c.save();

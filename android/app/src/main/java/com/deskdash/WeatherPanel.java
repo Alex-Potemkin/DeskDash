@@ -21,8 +21,9 @@ import java.util.List;
 import java.util.Locale;
 
 /**
- * The "Погода" block: now (icon, temperature, feels like, wind), the next hours and the next days.
- * When the block is short only the first row fits and the rest is hidden by the layout.
+ * The "Погода" block, like Apple's Weather widget: the sky of the moment as its background (blue by day,
+ * deep blue at night, grey under clouds), white text, now, the next hours and the next days. At night the
+ * dashboard's dim palette is kept instead. When the block is short only the first row fits.
  */
 final class WeatherPanel extends LinearLayout {
     interface Listener {
@@ -31,40 +32,49 @@ final class WeatherPanel extends LinearLayout {
         void onSetup();
     }
 
-    private final DashTheme th;
+    private DashTheme th;
     private final float dp;
-    private final boolean night;
+    private final boolean night, sky;
     private boolean compact;
     private final Icon icon;
     private final TextView temp, cond, more, empty;
     private final LinearLayout hours, days, now;
     private final HorizontalScrollView hourScroll;
 
-    WeatherPanel(Context c, DashTheme th, boolean night, Listener l) {
+    WeatherPanel(Context c, DashTheme theme, boolean night, Listener l) {
+        this(c, theme, night, l, false);
+    }
+
+    /** flat: no sky behind it (the top row of the day ribbon), the dashboard's own colours. */
+    WeatherPanel(Context c, DashTheme theme, boolean night, Listener l, boolean flat) {
         super(c);
-        this.th = th;
+        sky = !night && !flat;
+        // white on the sky: the text colours of a dark palette
+        th = sky ? DashTheme.byId("dark") : theme;
         this.night = night;
         dp = c.getResources().getDisplayMetrics().density;
         setOrientation(VERTICAL);
         setOnClickListener(v -> l.onTap());
+        if (sky) setPadding(px(18), px(16), px(18), px(14));
 
         now = new LinearLayout(c);
         now.setGravity(Gravity.CENTER_VERTICAL);
         icon = new Icon(c, th, night);
         now.addView(icon, new LayoutParams(px(58), px(58)));
-        temp = text(th.text, 44);
-        temp.setTypeface(Typeface.create("sans-serif-thin", Typeface.NORMAL));
+        temp = text(th.text, 46);
+        temp.setTypeface(Ui.font(300));
         temp.setIncludeFontPadding(false);
         LayoutParams tl = new LayoutParams(-2, -2);
         tl.leftMargin = px(10);
         now.addView(temp, tl);
         LinearLayout words = new LinearLayout(c);
         words.setOrientation(VERTICAL);
-        cond = text(th.text, 15);
+        cond = text(th.text, 16);
+        cond.setTypeface(Ui.font(600));
         cond.setSingleLine();
         cond.setEllipsize(TextUtils.TruncateAt.END);
         words.addView(cond);
-        more = text(th.dim, 12);
+        more = text(sky ? 0xD9FFFFFF : th.dim, 13);
         more.setMaxLines(2);
         more.setEllipsize(TextUtils.TruncateAt.END);
         words.addView(more);
@@ -91,7 +101,9 @@ final class WeatherPanel extends LinearLayout {
         empty = text(th.dim, 14);
         empty.setGravity(Gravity.CENTER);
         empty.setPadding(px(16), px(12), px(16), px(12));
-        empty.setBackground(round(th.surface, 16));
+        empty.setTextColor(sky ? 0xFFFFFFFF : th.dim);
+        if (sky) setBackground(skyBg(1, true));
+        else empty.setBackground(round(th.surface, 16));
         empty.setText("Погода: выбери город\nНастройки → «Погода»");
         empty.setOnClickListener(v -> l.onSetup());
         empty.setVisibility(GONE);
@@ -107,6 +119,7 @@ final class WeatherPanel extends LinearLayout {
         compact = true;
         temp.setTextSize(TypedValue.COMPLEX_UNIT_SP, 30);
         icon.getLayoutParams().width = icon.getLayoutParams().height = px(40);
+        setPadding(0, 0, px(8), 0);
     }
 
     /** The icon as a drawable, for the weather line under the clock. */
@@ -148,6 +161,7 @@ final class WeatherPanel extends LinearLayout {
             return;
         }
         icon.set(w.code, w.isDay);
+        if (sky) setBackground(skyBg(w.code, w.isDay));
         temp.setText(Weather.deg(w.temp));
         cond.setText(Weather.text(w.code));
         StringBuilder sb = new StringBuilder();
@@ -166,7 +180,8 @@ final class WeatherPanel extends LinearLayout {
             LinearLayout cell = new LinearLayout(getContext());
             cell.setOrientation(VERTICAL);
             cell.setGravity(Gravity.CENTER_HORIZONTAL);
-            TextView t = text(th.dim, 11);
+            TextView t = text(sky ? 0xD9FFFFFF : th.dim, 12);
+            t.setTypeface(Ui.font(500));
             t.setText(Weather.hour(h.time));
             cell.addView(t);
             Icon ic = new Icon(getContext(), th, night);
@@ -174,11 +189,12 @@ final class WeatherPanel extends LinearLayout {
             LayoutParams il = new LayoutParams(px(26), px(26));
             il.topMargin = px(2);
             cell.addView(ic, il);
-            TextView v = text(th.text, 13);
+            TextView v = text(th.text, 14);
+            v.setTypeface(Ui.font(600));
             v.setText(Weather.deg(h.temp));
             cell.addView(v);
             if (h.rain >= 30 && Weather.wet(h.code)) {
-                TextView r = text(night ? th.dim : 0xFF5AA7E0, 10);
+                TextView r = text(sky ? 0xFF9ED8FF : th.dim, 11);
                 r.setText(h.rain + "%");
                 cell.addView(r);
             }
@@ -192,11 +208,10 @@ final class WeatherPanel extends LinearLayout {
             if (!d.date.isAfter(today) || days.getChildCount() >= 3) continue;
             LinearLayout r = new LinearLayout(getContext());
             r.setGravity(Gravity.CENTER_VERTICAL);
-            r.setPadding(px(10), px(5), px(10), px(5));
-            r.setBackground(round(th.surface, 12));
+            r.setPadding(px(2), px(6), px(2), px(6));
             TextView n = text(th.text, 13);
             String name = d.date.equals(today.plusDays(1)) ? "Завтра"
-                    : d.date.getDayOfWeek().getDisplayName(TextStyle.FULL_STANDALONE, Locale.getDefault());
+                    : d.date.getDayOfWeek().getDisplayName(TextStyle.FULL_STANDALONE, Ui.RU);
             n.setText(Character.toUpperCase(name.charAt(0)) + name.substring(1));
             r.addView(n, new LayoutParams(0, -2, 1));
             Icon ic = new Icon(getContext(), th, night);
@@ -213,10 +228,26 @@ final class WeatherPanel extends LinearLayout {
             lo.setText(Weather.deg(d.min));
             lo.setMinWidth(px(34));
             r.addView(lo);
-            LayoutParams rl = new LayoutParams(-1, -2);
-            rl.bottomMargin = px(4);
-            days.addView(r, rl);
+            if (days.getChildCount() > 0) {
+                View line = new View(getContext());
+                line.setBackgroundColor(sky ? 0x33FFFFFF : th.line);
+                days.addView(line, new LayoutParams(-1, Math.max(1, (int) (dp * 0.6f))));
+            }
+            days.addView(r, new LayoutParams(-1, -2));
         }
+    }
+
+    /** The widget's background: a vertical gradient of the sky right now. */
+    private GradientDrawable skyBg(int code, boolean day) {
+        int g = Weather.group(code);
+        int[] cols;
+        if (!day) cols = new int[]{0xFF0B1630, 0xFF253A66};
+        else if (g == Weather.CLEAR || g == Weather.PARTLY) cols = new int[]{0xFF2E7BD6, 0xFF6FB1EA};
+        else if (g == Weather.STORM) cols = new int[]{0xFF2C3440, 0xFF56606E};
+        else cols = new int[]{0xFF4F6B85, 0xFF8299AE};
+        GradientDrawable d = new GradientDrawable(GradientDrawable.Orientation.TOP_BOTTOM, cols);
+        d.setCornerRadius(Ui.R_WIDGET * dp);
+        return d;
     }
 
     // ---------------------------------------------------------------- icon
@@ -252,8 +283,8 @@ final class WeatherPanel extends LinearLayout {
 
         /** Draws the icon into an s×s square at the canvas origin (also used by the day ribbon). */
         void paint(Canvas c, float s) {
-            int sun = night ? th.accent : 0xFFF2B33D, cloud = night ? th.dim : th.light ? 0xFF9AA3AE : 0xFFD7DCE2,
-                    drop = night ? th.accent : 0xFF5AA7E0, moon = night ? th.accent : 0xFFE8DDB5;
+            int sun = night ? th.accent : 0xFFFFD60A, cloud = night ? th.dim : th.light ? 0xFF9AA3AE : 0xFFF2F4F7,
+                    drop = night ? th.accent : 0xFF8FD3FF, moon = night ? th.accent : 0xFFF5EFD6;
             p.setStrokeCap(Paint.Cap.ROUND);
             switch (group) {
                 case Weather.CLEAR:

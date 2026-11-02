@@ -28,7 +28,8 @@ import java.util.List;
  * out, the theme and the clock), the weather and the night, then connect what's around — "find
  * everything" looks for the PC, the hub, Home Assistant and printers at once. Every step can be skipped;
  * all of it can be changed later in the settings. After an update, or from the settings, the same
- * wizard runs as a tour without the first step, so the desks stay as they are.
+ * wizard runs as a tour without the first step, so the desks stay as they are. Laid out like the iPhone's
+ * setup: a coloured icon, a large centred title, the choices, and one big "Продолжить" button.
  */
 public class WelcomeActivity extends Activity {
     static final String EXTRA_TOUR = "tour";
@@ -97,41 +98,62 @@ public class WelcomeActivity extends Activity {
         getWindow().setNavigationBarColor(th.bg);
         boolean last = step == steps.size() - 1;
 
+        if (th.light) getWindow().getDecorView().setSystemUiVisibility(View.SYSTEM_UI_FLAG_LIGHT_STATUS_BAR);
+        else getWindow().getDecorView().setSystemUiVisibility(0);
+
         LinearLayout page = new LinearLayout(this);
         page.setOrientation(LinearLayout.VERTICAL);
-        page.setPadding(px(28), px(14), px(28), px(10));
+        page.setPadding(px(24), px(10), px(24), px(14));
 
+        // "‹ Назад" on the left, "Пропустить" on the right, both in the accent colour
         LinearLayout head = new LinearLayout(this);
         head.setGravity(Gravity.CENTER_VERTICAL);
-        for (int i = 0; i < steps.size(); i++) {
-            View d = new View(this);
-            d.setBackground(round(i == step ? th.accent : th.line, 4));
-            LinearLayout.LayoutParams l = new LinearLayout.LayoutParams(px(i == step ? 22 : 8), px(8));
-            l.rightMargin = px(6);
-            head.addView(d, l);
-        }
-        View sp = new View(this);
-        head.addView(sp, new LinearLayout.LayoutParams(0, 1, 1));
-        TextView skip = text(th.dim, 14);
+        TextView back = text(th.accent, 17);
+        back.setText(step > 0 ? "‹ Назад" : "");
+        back.setPadding(0, px(8), px(16), px(8));
+        back.setOnClickListener(v -> {
+            if (step == 0) return;
+            step--;
+            render();
+        });
+        head.addView(back);
+        head.addView(new View(this), new LinearLayout.LayoutParams(0, 1, 1));
+        TextView skip = text(th.accent, 17);
         skip.setText(last ? "" : tour ? "Закрыть" : "Пропустить");
-        skip.setPadding(px(10), px(6), 0, px(6));
+        skip.setPadding(px(16), px(8), 0, px(8));
         skip.setOnClickListener(v -> finishWelcome());
         head.addView(skip);
         page.addView(head);
-
-        TextView title = text(th.text, 24);
-        title.setTypeface(Typeface.create("sans-serif-light", Typeface.NORMAL));
-        TextView sub = text(th.dim, 14);
-        sub.setLineSpacing(0, 1.15f);
-        page.addView(title, lp(8, 2));
-        page.addView(sub, lp(0, 10));
 
         ScrollView sv = new ScrollView(this);
         sv.setVerticalScrollBarEnabled(false);
         LinearLayout body = new LinearLayout(this);
         body.setOrientation(LinearLayout.VERTICAL);
-        sv.addView(body);
+        body.setGravity(Gravity.CENTER_HORIZONTAL);
+        FrameLayout center = new FrameLayout(this);
+        int colW = Math.min(getResources().getDisplayMetrics().widthPixels - px(48), px(820));
+        center.addView(body, new FrameLayout.LayoutParams(colW, -2, Gravity.CENTER_HORIZONTAL));
+        sv.addView(center);
         page.addView(sv, new LinearLayout.LayoutParams(-1, 0, 1));
+
+        ImageView badge = new ImageView(this);
+        int[][] icons = {{R.drawable.ic_dashboard, Ui.BLUE}, {R.drawable.ic_palette, Ui.INDIGO},
+                {R.drawable.ic_night, Ui.PURPLE}, {R.drawable.ic_devices, Ui.GREEN}};
+        String stepId = steps.get(step);
+        int[] ic = icons["preset".equals(stepId) ? 0 : "look".equals(stepId) ? 1 : "night".equals(stepId) ? 2 : 3];
+        badge.setImageResource(ic[0]);
+        badge.setImageTintList(ColorStateList.valueOf(0xFFFFFFFF));
+        badge.setPadding(px(9), px(9), px(9), px(9));
+        badge.setBackground(round(ic[1], 12));
+        body.addView(badge, new LinearLayout.LayoutParams(px(44), px(44)));
+        TextView title = text(th.text, 27);
+        title.setTypeface(Ui.font(700));
+        title.setGravity(Gravity.CENTER);
+        TextView sub = text(th.dim, 15);
+        sub.setGravity(Gravity.CENTER);
+        sub.setLineSpacing(0, 1.1f);
+        body.addView(title, lp(8, 2));
+        body.addView(sub, lp(0, 14));
 
         switch (steps.get(step)) {
             case "preset":
@@ -156,24 +178,12 @@ public class WelcomeActivity extends Activity {
                 break;
         }
 
-        LinearLayout nav = new LinearLayout(this);
-        nav.setGravity(Gravity.CENTER_VERTICAL);
-        if (step > 0) {
-            TextView back = text(th.dim, 15);
-            back.setText("Назад");
-            back.setPadding(px(4), px(12), px(20), px(12));
-            back.setOnClickListener(v -> {
-                step--;
-                render();
-            });
-            nav.addView(back);
-        }
-        nav.addView(new View(this), new LinearLayout.LayoutParams(0, 1, 1));
-        TextView next = text(DashTheme.onColor(th.accent), 16);
-        next.setText(last ? "Готово" : "Дальше");
-        next.setTypeface(Typeface.create("sans-serif-medium", Typeface.NORMAL));
-        next.setPadding(px(28), px(12), px(28), px(12));
-        next.setBackground(round(th.accent, 24));
+        // one big button at the bottom, as in the iPhone's setup
+        TextView next = text(DashTheme.onColor(th.accent), 17);
+        next.setText(last ? "Готово" : "Продолжить");
+        next.setTypeface(Ui.font(600));
+        next.setGravity(Gravity.CENTER);
+        next.setBackground(round(th.accent, Ui.R_BUTTON));
         next.setOnClickListener(v -> {
             if (last) {
                 finishWelcome();
@@ -182,8 +192,10 @@ public class WelcomeActivity extends Activity {
                 render();
             }
         });
-        nav.addView(next);
-        page.addView(nav, lp(10, 0));
+        LinearLayout.LayoutParams nl = new LinearLayout.LayoutParams(Math.min(colW, px(360)), px(50));
+        nl.gravity = Gravity.CENTER_HORIZONTAL;
+        nl.topMargin = px(10);
+        page.addView(next, nl);
         root.addView(page, new FrameLayout.LayoutParams(-1, -1));
     }
 
@@ -194,8 +206,8 @@ public class WelcomeActivity extends Activity {
             LinearLayout card = new LinearLayout(this);
             card.setOrientation(LinearLayout.VERTICAL);
             card.setPadding(px(10), px(10), px(10), px(12));
-            GradientDrawable bg = round(sel ? DashTheme.blend(th.surface, th.accent, 0.18f) : th.surface, 18);
-            if (sel) bg.setStroke(px(2), th.accent);
+            GradientDrawable bg = round(th.surface, 18);
+            if (sel) bg.setStroke(px(2.5f), th.accent);
             card.setBackground(bg);
             Presets.Preview pv = new Presets.Preview(this);
             pv.set(p, DashTheme.byId(p.theme));
@@ -208,7 +220,7 @@ public class WelcomeActivity extends Activity {
             name.addView(ic, new LinearLayout.LayoutParams(px(18), px(18)));
             TextView n = text(th.text, 16);
             n.setText(p.name);
-            n.setTypeface(Typeface.create("sans-serif-medium", Typeface.NORMAL));
+            n.setTypeface(Ui.font(600));
             n.setPadding(px(8), 0, 0, 0);
             name.addView(n);
             card.addView(name, lp(10, 2));
@@ -238,13 +250,14 @@ public class WelcomeActivity extends Activity {
             LinearLayout card = new LinearLayout(this);
             card.setOrientation(LinearLayout.VERTICAL);
             card.setPadding(px(8), px(8), px(8), px(10));
-            GradientDrawable bg = round(sel ? DashTheme.blend(th.surface, th.accent, 0.18f) : th.surface, 16);
-            bg.setStroke(px(sel ? 2 : 1), sel ? th.accent : th.line);
+            GradientDrawable bg = round(th.surface, 16);
+            if (sel) bg.setStroke(px(2.5f), th.accent);
             card.setBackground(bg);
             Presets.LookPreview pv = new Presets.LookPreview(this);
             pv.set(l[0], th);
             card.addView(pv, new LinearLayout.LayoutParams(px(150), px(84)));
-            TextView n = text(sel ? th.accent : th.text, 14);
+            TextView n = text(sel ? th.accent : th.text, 15);
+            n.setTypeface(Ui.font(sel ? 600 : 400));
             n.setText(l[1]);
             n.setGravity(Gravity.CENTER);
             card.addView(n, lp(6, 0));
@@ -257,7 +270,8 @@ public class WelcomeActivity extends Activity {
             styles.addView(card, ll);
         }
         body.addView(scroll(styles));
-        TextView about = text(th.dim, 12);
+        TextView about = text(th.dim, 14);
+        about.setGravity(Gravity.CENTER);
         about.setText(SettingsActivity.lookAbout(style));
         body.addView(about, lp(6, 0));
 
@@ -269,8 +283,8 @@ public class WelcomeActivity extends Activity {
             LinearLayout card = new LinearLayout(this);
             card.setOrientation(LinearLayout.VERTICAL);
             card.setPadding(px(8), px(8), px(8), px(10));
-            GradientDrawable bg = round(t.surface, 16);
-            bg.setStroke(px(sel ? 2 : 1), sel ? th.accent : th.line);
+            GradientDrawable bg = round(t.bg, 16);
+            bg.setStroke(px(sel ? 2.5f : 1), sel ? th.accent : th.line);
             card.setBackground(bg);
             Presets.LookPreview pv = new Presets.LookPreview(this);
             pv.set(style, t);
@@ -338,12 +352,12 @@ public class WelcomeActivity extends Activity {
     }
 
     private void connections(LinearLayout body) {
-        TextView all = text(DashTheme.onColor(th.accent), 15);
+        TextView all = text(th.accent, 17);
         all.setText("Найти всё в сети: компьютер, хаб, Home Assistant, принтер");
-        all.setTypeface(Typeface.create("sans-serif-medium", Typeface.NORMAL));
+        all.setTypeface(Ui.font(600));
         all.setGravity(Gravity.CENTER);
-        all.setPadding(px(16), px(12), px(16), px(12));
-        all.setBackground(round(th.accent, 18));
+        all.setPadding(px(16), px(13), px(16), px(13));
+        all.setBackground(round(th.surface, Ui.R_GROUP));
         all.setOnClickListener(v -> Setup.findAll(this, prefs, this::render));
         body.addView(all, lp(0, 10));
 
@@ -373,39 +387,71 @@ public class WelcomeActivity extends Activity {
                 printers > 0 ? "Ещё" : "Найти", v -> Setup.findPrinter(this, prefs, this::render));
     }
 
+    /** A row of the iOS-style group of connections: a coloured icon square, two lines, an action or a tick. */
     private void connRow(LinearLayout body, int icon, String title, String sub, String action, View.OnClickListener l) {
+        LinearLayout g = null;
+        View last = body.getChildCount() == 0 ? null : body.getChildAt(body.getChildCount() - 1);
+        if (last instanceof LinearLayout && "group".equals(last.getTag())) {
+            g = (LinearLayout) last;
+            View line = new View(this);
+            line.setBackgroundColor(th.line);
+            LinearLayout.LayoutParams ll = new LinearLayout.LayoutParams(-1, Math.max(1, (int) (dp * 0.6f)));
+            ll.leftMargin = px(58);
+            g.addView(line, ll);
+        } else {
+            g = new LinearLayout(this);
+            g.setOrientation(LinearLayout.VERTICAL);
+            g.setTag("group");
+            g.setBackground(round(th.surface, Ui.R_GROUP));
+            body.addView(g, lp(0, 8));
+        }
         LinearLayout r = new LinearLayout(this);
         r.setGravity(Gravity.CENTER_VERTICAL);
-        r.setPadding(px(14), px(10), px(12), px(10));
-        r.setBackground(round(th.surface, 16));
+        r.setPadding(px(14), px(10), px(14), px(10));
         ImageView ic = new ImageView(this);
         ic.setImageResource(icon);
-        ic.setImageTintList(ColorStateList.valueOf(th.accent));
-        r.addView(ic, new LinearLayout.LayoutParams(px(24), px(24)));
+        ic.setImageTintList(ColorStateList.valueOf(0xFFFFFFFF));
+        ic.setPadding(px(5), px(5), px(5), px(5));
+        ic.setBackground(round(iconColor(icon), 8));
+        r.addView(ic, new LinearLayout.LayoutParams(px(30), px(30)));
         LinearLayout t = new LinearLayout(this);
         t.setOrientation(LinearLayout.VERTICAL);
-        TextView a = text(th.text, 15);
+        TextView a = text(th.text, 17);
         a.setText(title);
         t.addView(a);
-        TextView b = text(th.dim, 12);
+        TextView b = text(th.dim, 13);
         b.setText(sub);
         t.addView(b);
         LinearLayout.LayoutParams tl = new LinearLayout.LayoutParams(0, -2, 1);
         tl.setMargins(px(14), 0, px(10), 0);
         r.addView(t, tl);
         if (!action.isEmpty()) {
-            TextView btn = text(th.text, 14);
+            TextView btn = text(th.accent, 15);
+            btn.setTypeface(Ui.font(600));
             btn.setText(action);
-            btn.setPadding(px(16), px(8), px(16), px(8));
-            btn.setBackground(round(th.bg, 16));
+            btn.setPadding(px(14), px(6), px(14), px(6));
+            btn.setBackground(round(Ui.fill(th), 100));
             btn.setOnClickListener(l);
             r.addView(btn);
         } else {
-            TextView ok = text(th.accent, 18);
+            TextView ok = text(Ui.GREEN, 20);
+            ok.setTypeface(Ui.font(700));
             ok.setText("✓");
             r.addView(ok);
         }
-        body.addView(r, lp(0, 8));
+        g.addView(r, new LinearLayout.LayoutParams(-1, -2));
+    }
+
+    private static int iconColor(int icon) {
+        if (icon == R.drawable.ic_desktop) return Ui.GRAY;
+        if (icon == R.drawable.ic_calendar) return Ui.RED;
+        if (icon == R.drawable.ic_music) return Ui.PINK;
+        if (icon == R.drawable.ic_home) return Ui.ORANGE;
+        if (icon == R.drawable.ic_bulb) return Ui.TEAL;
+        if (icon == R.drawable.ic_speaker) return Ui.PURPLE;
+        if (icon == R.drawable.ic_printer) return Ui.BROWN;
+        if (icon == R.drawable.ic_weather) return Ui.BLUE;
+        return Ui.INDIGO;
     }
 
     private void finishWelcome() {
@@ -428,10 +474,11 @@ public class WelcomeActivity extends Activity {
         LinearLayout row = new LinearLayout(this);
         for (String[] o : options) {
             boolean sel = o[0].equals(cur);
-            TextView chip = text(sel ? DashTheme.onColor(th.accent) : th.text, 14);
+            TextView chip = text(sel ? DashTheme.onColor(th.accent) : th.text, 15);
+            chip.setTypeface(Ui.font(sel ? 600 : 400));
             chip.setText(o[1]);
             chip.setPadding(px(16), px(9), px(16), px(9));
-            chip.setBackground(round(sel ? th.accent : th.surface, 18));
+            chip.setBackground(round(sel ? th.accent : Ui.fill(th), 100));
             chip.setOnClickListener(v -> {
                 p.on(o[0]);
                 render();
@@ -446,7 +493,7 @@ public class WelcomeActivity extends Activity {
     private TextView caption(String s) {
         TextView cap = text(th.dim, 13);
         cap.setText(s);
-        cap.setLetterSpacing(0.14f);
+        cap.setPadding(px(16), 0, 0, 0);
         return cap;
     }
 

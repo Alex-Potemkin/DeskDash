@@ -57,19 +57,10 @@ final class CallPanel extends LinearLayout {
         dp = c.getResources().getDisplayMetrics().density;
         setOrientation(VERTICAL);
 
-        LinearLayout head = new LinearLayout(c);
-        head.setGravity(Gravity.CENTER_VERTICAL);
-        TextView t = text(th.dim, 12);
-        t.setText("СОЗВОНЫ");
-        t.setLetterSpacing(0.16f);
-        t.setTypeface(Typeface.create("sans-serif-medium", Typeface.NORMAL));
-        head.addView(t);
-        count = text(th.dim, 12);
-        count.setSingleLine();
-        head.addView(count, new LayoutParams(0, -2, 1));
+        count = new TextView(c);
         LayoutParams hl = new LayoutParams(-1, -2);
-        hl.setMargins(px(4), px(4), 0, px(8));
-        addView(head, hl);
+        hl.setMargins(0, 0, 0, px(10));
+        addView(Ui.header(c, th, R.drawable.ic_camera, th.isNight() ? th.accent : Ui.GREEN, "Созвоны", count), hl);
 
         ScrollView sv = new ScrollView(c);
         sv.setVerticalScrollBarEnabled(false);
@@ -107,7 +98,7 @@ final class CallPanel extends LinearLayout {
         long now = System.currentTimeMillis();
         List<Meetings.Meeting> left = new ArrayList<>();
         for (Meetings.Meeting m : today) if (m.event.end > now) left.add(m);
-        count.setText(today.isEmpty() ? "" : "  · " + today.size() + " сегодня" + (left.size() < today.size() && !left.isEmpty() ? ", ещё " + left.size() : ""));
+        count.setText(today.isEmpty() ? "" : today.size() + " сегодня" + (left.size() < today.size() && !left.isEmpty() ? ", ещё " + left.size() : ""));
 
         PcClient.Call call = live == null || live.calls.isEmpty() ? null : live.calls.get(0);
         Meetings.Meeting next = null;
@@ -139,8 +130,10 @@ final class CallPanel extends LinearLayout {
             e.setGravity(Gravity.CENTER);
             e.setLineSpacing(0, 1.15f);
             e.setPadding(px(14), px(14), px(14), px(14));
-            e.setBackground(round(th.surface, 16));
-            e.setText("Сегодня созвонов нет.\nВстречи из календаря, звонки на телефоне\nи по ссылке появятся здесь");
+            e.setText("Сегодня созвонов нет");
+            e.setGravity(Gravity.START);
+            e.setTextSize(TypedValue.COMPLEX_UNIT_SP, 15);
+            e.setPadding(0, 0, 0, px(2));
             body.addView(e, lp(0, 4));
         }
         LinearLayout quick = new LinearLayout(getContext());
@@ -149,8 +142,8 @@ final class CallPanel extends LinearLayout {
             quick.addView(round("Ссылка " + clip.platform.name + " из буфера · войти", DashTheme.blend(th.surface, clip.platform.color, 0.3f),
                     th.text, v -> listener.onJoin(clip, pcOnline)), btnLp());
         }
-        quick.addView(round("+ Звонок по ссылке", th.surface, th.text, v -> listener.onQuick()), btnLp());
-        if (canStream && call == null) quick.addView(round("Экран ПК", th.surface, th.text, v -> listener.onScreen()), btnLp());
+        quick.addView(round("+ По ссылке", Ui.fill(th), th.accent, v -> listener.onQuick()), btnLp());
+        if (canStream && call == null) quick.addView(round("Экран ПК", Ui.fill(th), th.accent, v -> listener.onScreen()), btnLp());
         android.widget.HorizontalScrollView qs = new android.widget.HorizontalScrollView(getContext());
         qs.setHorizontalScrollBarEnabled(false);
         qs.addView(quick);
@@ -162,8 +155,7 @@ final class CallPanel extends LinearLayout {
     private View phoneCard(PhoneCalls.Call c, boolean muted, boolean speaker) {
         LinearLayout card = vertical();
         card.setPadding(px(12), px(10), px(12), px(10));
-        GradientDrawable bg = round(DashTheme.blend(th.surface, c.color, 0.22f), 18);
-        bg.setStroke(px(1.5f), DashTheme.blend(th.surface, c.color, 0.7f));
+        GradientDrawable bg = round(DashTheme.blend(th.surface, c.color, th.light ? 0.14f : 0.24f), Ui.R_TILE);
         card.setBackground(bg);
 
         LinearLayout top = new LinearLayout(getContext());
@@ -171,7 +163,7 @@ final class CallPanel extends LinearLayout {
         top.addView(badge(PhoneCalls.badge(c), c.color, 34), new LayoutParams(px(34), px(34)));
         LinearLayout names = vertical();
         TextView title = text(th.text, 15);
-        title.setTypeface(Typeface.create("sans-serif-medium", Typeface.NORMAL));
+        title.setTypeface(Ui.font(600));
         title.setSingleLine();
         title.setEllipsize(TextUtils.TruncateAt.END);
         title.setText(c.title.isEmpty() ? c.app : c.title);
@@ -185,7 +177,7 @@ final class CallPanel extends LinearLayout {
         top.addView(names, nl);
         if (!c.ringing) {
             TextView timer = text(th.text, 22);
-            timer.setTypeface(Typeface.create("sans-serif-light", Typeface.NORMAL));
+            timer.setTypeface(Ui.font(500));
             Runnable upd = () -> timer.setText(clock((System.currentTimeMillis() - c.since) / 1000));
             upd.run();
             tickers.add(upd);
@@ -195,16 +187,16 @@ final class CallPanel extends LinearLayout {
 
         LinearLayout btns = new LinearLayout(getContext());
         if (c.ringing) {
-            btns.addView(round("Ответить", 0xFF34A853, 0xFFFFFFFF, v -> listener.onPhone(c, "answer")), btnLp());
-            if (c.hangup != null) btns.addView(round("Отклонить", 0x33E5534B, 0xFFE5534B, v -> listener.onPhone(c, "hangup")), btnLp());
+            btns.addView(round("Ответить", Ui.GREEN, 0xFFFFFFFF, v -> listener.onPhone(c, "answer")), btnLp());
+            if (c.hangup != null) btns.addView(round("Отклонить", Ui.RED, 0xFFFFFFFF, v -> listener.onPhone(c, "hangup")), btnLp());
         } else {
-            btns.addView(round("Мик " + (muted ? "выкл" : "вкл"), muted ? 0xFFE5534B : th.bg, muted ? 0xFFFFFFFF : th.text,
+            btns.addView(round(muted ? "Мик выкл" : "Мик", muted ? 0xFFFFFFFF : Ui.fill(th), muted ? 0xFF000000 : th.text,
                     v -> listener.onPhone(c, "mute")), btnLp());
-            btns.addView(round(speaker ? "Динамик вкл" : "Динамик", speaker ? th.accent : th.bg,
-                    speaker ? DashTheme.onColor(th.accent) : th.text, v -> listener.onPhone(c, "speaker")), btnLp());
-            if (c.open != null) btns.addView(round("Открыть", th.bg, th.text, v -> listener.onPhone(c, "open")), btnLp());
+            btns.addView(round("Динамик", speaker ? 0xFFFFFFFF : Ui.fill(th), speaker ? 0xFF000000 : th.text,
+                    v -> listener.onPhone(c, "speaker")), btnLp());
+            if (c.open != null) btns.addView(round("Открыть", Ui.fill(th), th.text, v -> listener.onPhone(c, "open")), btnLp());
             if (c.hangup != null) {
-                TextView leave = round("Завершить", 0x33E5534B, 0xFFE5534B, null);
+                TextView leave = round("Завершить", Ui.RED, 0xFFFFFFFF, null);
                 leave.setOnClickListener(v -> {
                     if (!leaveArmed) {
                         leaveArmed = true;
@@ -240,8 +232,7 @@ final class CallPanel extends LinearLayout {
     private View liveCard(PcClient.Call c, Boolean muted, boolean canStream, Meetings.Meeting m) {
         LinearLayout card = vertical();
         card.setPadding(px(12), px(10), px(12), px(10));
-        GradientDrawable bg = round(DashTheme.blend(th.surface, c.color, 0.22f), 18);
-        bg.setStroke(px(1.5f), DashTheme.blend(th.surface, c.color, 0.7f));
+        GradientDrawable bg = round(DashTheme.blend(th.surface, c.color, th.light ? 0.14f : 0.24f), Ui.R_TILE);
         card.setBackground(bg);
 
         LinearLayout top = new LinearLayout(getContext());
@@ -249,7 +240,7 @@ final class CallPanel extends LinearLayout {
         top.addView(badge(Meetings.byId(c.id).badge(), c.color, 34), new LayoutParams(px(34), px(34)));
         LinearLayout names = vertical();
         TextView title = text(th.text, 15);
-        title.setTypeface(Typeface.create("sans-serif-medium", Typeface.NORMAL));
+        title.setTypeface(Ui.font(600));
         title.setSingleLine();
         title.setEllipsize(TextUtils.TruncateAt.END);
         String t = m != null ? m.event.title : c.title;
@@ -264,7 +255,7 @@ final class CallPanel extends LinearLayout {
         LayoutParams nl = (LayoutParams) names.getLayoutParams();
         nl.leftMargin = px(12);
         TextView timer = text(th.text, 22);
-        timer.setTypeface(Typeface.create("sans-serif-light", Typeface.NORMAL));
+        timer.setTypeface(Ui.font(500));
         Runnable upd = () -> timer.setText(clock((System.currentTimeMillis() - c.since) / 1000));
         upd.run();
         tickers.add(upd);
@@ -275,17 +266,19 @@ final class CallPanel extends LinearLayout {
         btns.setGravity(Gravity.CENTER_VERTICAL);
         if (muted != null) {
             boolean mu = muted;
-            btns.addView(round("Мик " + (mu ? "выкл" : "вкл"), mu ? 0xFFE5534B : th.bg, mu ? 0xFFFFFFFF : th.text,
+            // as in FaceTime: a muted mic is a white button
+            btns.addView(round(mu ? "Мик выкл" : "Мик", mu ? 0xFFFFFFFF : Ui.fill(th), mu ? 0xFF000000 : th.text,
                     v -> listener.onCallAction(c, mu ? "unmute" : "mute")), btnLp());
         }
         if (c.actions.contains("camera")) {
-            btns.addView(round(c.camera ? "Камера вкл" : "Камера выкл", th.bg, th.text, v -> listener.onCallAction(c, "camera")), btnLp());
+            btns.addView(round(c.camera ? "Камера" : "Камера выкл", c.camera ? Ui.fill(th) : 0xFFFFFFFF, c.camera ? th.text : 0xFF000000,
+                    v -> listener.onCallAction(c, "camera")), btnLp());
         }
-        if (c.actions.contains("share")) btns.addView(round("Экран", th.bg, th.text, v -> listener.onCallAction(c, "share")), btnLp());
-        if (c.actions.contains("hand")) btns.addView(round("✋", th.bg, th.text, v -> listener.onCallAction(c, "hand")), btnLp());
+        if (c.actions.contains("share")) btns.addView(round("Экран", Ui.fill(th), th.text, v -> listener.onCallAction(c, "share")), btnLp());
+        if (c.actions.contains("hand")) btns.addView(round("✋", Ui.fill(th), th.text, v -> listener.onCallAction(c, "hand")), btnLp());
         if (canStream) btns.addView(round("На телефон", th.accent, DashTheme.onColor(th.accent), v -> listener.onScreen()), btnLp());
         if (c.actions.contains("leave")) {
-            TextView leave = round("Выйти", 0x33E5534B, 0xFFE5534B, null);
+            TextView leave = round("Выйти", Ui.RED, 0xFFFFFFFF, null);
             leave.setOnClickListener(v -> {
                 if (!leaveArmed) {
                     leaveArmed = true;
@@ -313,8 +306,7 @@ final class CallPanel extends LinearLayout {
         LinearLayout card = vertical();
         card.setPadding(px(14), px(12), px(14), px(12));
         boolean soon = m.event.start - now <= remindMin * 60_000L;
-        GradientDrawable bg = round(soon ? DashTheme.blend(th.surface, m.platform.color, 0.18f) : th.surface, 18);
-        if (soon) bg.setStroke(px(1.5f), DashTheme.blend(th.surface, m.platform.color, 0.6f));
+        GradientDrawable bg = round(soon ? DashTheme.blend(th.surface, m.platform.color, th.light ? 0.14f : 0.24f) : Ui.fill(th), Ui.R_TILE);
         card.setBackground(bg);
 
         LinearLayout top = new LinearLayout(getContext());
@@ -322,7 +314,7 @@ final class CallPanel extends LinearLayout {
         top.addView(badge(m.platform.badge(), m.platform.color, 40), new LayoutParams(px(40), px(40)));
         LinearLayout names = vertical();
         TextView title = text(th.text, 16);
-        title.setTypeface(Typeface.create("sans-serif-medium", Typeface.NORMAL));
+        title.setTypeface(Ui.font(600));
         title.setMaxLines(2);
         title.setEllipsize(TextUtils.TruncateAt.END);
         title.setText(m.event.title);
@@ -337,16 +329,16 @@ final class CallPanel extends LinearLayout {
         card.addView(top);
 
         TextView when = text(soon ? th.accent : th.text, 20);
-        when.setTypeface(Typeface.create("sans-serif-light", Typeface.NORMAL));
+        when.setTypeface(Ui.font(700));
         Runnable upd = () -> when.setText(countdown(m, System.currentTimeMillis()));
         upd.run();
         tickers.add(upd);
         card.addView(when, lp(10, 0));
 
         LinearLayout btns = new LinearLayout(getContext());
-        if (pcOnline) btns.addView(round("Подключиться на ПК", th.accent, DashTheme.onColor(th.accent), v -> listener.onJoin(m, true)), btnLp());
-        btns.addView(round(pcOnline ? "С телефона" : "Подключиться", pcOnline ? th.bg : th.accent,
-                pcOnline ? th.text : DashTheme.onColor(th.accent), v -> listener.onJoin(m, false)), btnLp());
+        if (pcOnline) btns.addView(round("Войти на ПК", Ui.GREEN, 0xFFFFFFFF, v -> listener.onJoin(m, true)), btnLp());
+        btns.addView(round(pcOnline ? "С телефона" : "Войти", pcOnline ? th.surface : Ui.GREEN,
+                pcOnline ? th.text : 0xFFFFFFFF, v -> listener.onJoin(m, false)), btnLp());
         card.addView(btns, lp(10, 0));
         return card;
     }
@@ -354,8 +346,8 @@ final class CallPanel extends LinearLayout {
     private View row(Meetings.Meeting m, long now, boolean pcOnline) {
         LinearLayout r = new LinearLayout(getContext());
         r.setGravity(Gravity.CENTER_VERTICAL);
-        r.setPadding(px(10), px(8), px(10), px(8));
-        r.setBackground(round(th.surface, 14));
+        r.setPadding(px(12), px(10), px(12), px(10));
+        r.setBackground(round(Ui.fill(th), 12));
         boolean past = m.event.end <= now;
         r.setAlpha(past ? 0.5f : 1f);
         TextView tm = text(th.dim, 13);
@@ -413,13 +405,13 @@ final class CallPanel extends LinearLayout {
     }
 
     private TextView round(String label, int bg, int fg, View.OnClickListener l) {
-        TextView t = text(fg, 13);
+        TextView t = text(fg, 14);
         t.setText(label);
         t.setGravity(Gravity.CENTER);
         t.setSingleLine();
-        t.setTypeface(Typeface.create("sans-serif-medium", Typeface.NORMAL));
-        t.setPadding(px(13), px(7), px(13), px(7));
-        t.setBackground(round(bg, 18));
+        t.setTypeface(Ui.font(600));
+        t.setPadding(px(15), px(8), px(15), px(8));
+        t.setBackground(round(bg, 100));
         if (l != null) {
             t.setOnClickListener(v -> {
                 v.performHapticFeedback(HapticFeedbackConstants.VIRTUAL_KEY);

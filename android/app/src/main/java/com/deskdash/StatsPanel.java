@@ -44,13 +44,9 @@ final class StatsPanel extends LinearLayout {
         listener = l;
         dp = c.getResources().getDisplayMetrics().density;
         setOrientation(VERTICAL);
-        TextView t = text(th.dim, 12);
-        t.setText("ДЕНЬ");
-        t.setLetterSpacing(0.16f);
-        t.setTypeface(Typeface.create("sans-serif-medium", Typeface.NORMAL));
         LayoutParams hl = new LayoutParams(-1, -2);
-        hl.setMargins(px(4), px(4), 0, px(8));
-        addView(t, hl);
+        hl.setMargins(0, 0, 0, px(10));
+        addView(Ui.header(c, th, R.drawable.ic_chart, th.isNight() ? th.accent : Ui.ORANGE, "Экранное время", null), hl);
         ScrollView sv = new ScrollView(c);
         sv.setVerticalScrollBarEnabled(false);
         sv.setOverScrollMode(OVER_SCROLL_NEVER);
@@ -131,7 +127,7 @@ final class StatsPanel extends LinearLayout {
                     JSONObject d = week.optJSONObject(i);
                     wv[i] = d.optInt("active_min");
                     try {
-                        wl[i] = LocalDate.parse(d.optString("date")).getDayOfWeek().getDisplayName(TextStyle.SHORT, Locale.getDefault());
+                        wl[i] = LocalDate.parse(d.optString("date")).getDayOfWeek().getDisplayName(TextStyle.SHORT, Ui.RU);
                     } catch (RuntimeException e) {
                         wl[i] = "";
                     }

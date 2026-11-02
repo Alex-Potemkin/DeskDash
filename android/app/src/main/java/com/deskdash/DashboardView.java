@@ -94,10 +94,11 @@ import java.util.concurrent.Executors;
 import java.util.concurrent.atomic.AtomicBoolean;
 
 /**
- * The whole dashboard. Shows the current desk of the active profile: columns of blocks (clock,
- * music, PC macros, calendar, smart home tiles, weather); horizontal swipes or the dots at the bottom switch desks.
- * The same blocks in other looks (Settings → «Вид»): cards ("bento"), a big clock with the desks on a tap
- * ("focus"), sections on a side rail ("dock") and the day as a strip ("ribbon"). At night: a dim clock only,
+ * The whole dashboard, styled after Apple's widgets. Shows the current desk of the active profile: columns
+ * of widgets (clock, music, PC shortcuts, calendar, smart home tiles, weather); horizontal swipes or the dots at the
+ * bottom switch desks. The same widgets in other looks (Settings → «Вид»): StandBy (a big clock and a stack of
+ * widgets swiped up and down), sections on a side rail ("dock") and the day as a strip ("ribbon"). Live things
+ * (calls, prints, alarms) sit in a black pill at the top, like the Dynamic Island. At night: a dim clock only,
  * the desk in night colours or the own theme quieter; night starts by the clock, at sunset or when the room goes dark.
  * Vertical swipes along the right edge change volume, along the left edge brightness.
  * Hosted by MainActivity and by the DashDream screensaver.
@@ -229,6 +230,7 @@ public class DashboardView extends FrameLayout {
     private RibbonView ribbon;
     private List<CalEvent> ribbonEvents = new ArrayList<>();
     private LinearLayout focusPills;
+    private FrameLayout stack;
     private String nightText = "";
 
     // night by the room light
@@ -370,11 +372,11 @@ public class DashboardView extends FrameLayout {
         look = prefs.uiStyle();
         boolean nightClock = nightActive && "clock".equals(prefs.nightLook());
         if (peeking) {
-            if ("focus".equals(look)) look = "classic";
+            if ("standby".equals(look)) look = "bento";
         } else if (nightClock) {
             look = "night";
         }
-        deskSwipe = "classic".equals(look) || "bento".equals(look);
+        deskSwipe = "bento".equals(look);
 
         JSONArray desks = Desks.load(prefs);
         deskCount = desks.length();
@@ -394,8 +396,8 @@ public class DashboardView extends FrameLayout {
             case "night":
                 buildNight();
                 break;
-            case "focus":
-                buildFocus();
+            case "standby":
+                buildStandby(desks);
                 break;
             case "dock":
                 buildDock(desk, portrait, used);
@@ -404,7 +406,7 @@ public class DashboardView extends FrameLayout {
                 buildRibbon(desks);
                 break;
             default:
-                buildDesk(content, desk, portrait, used, "bento".equals(look));
+                buildDesk(content, desk, portrait, used, true);
                 break;
         }
         level = new LevelView(ctx);
@@ -443,7 +445,7 @@ public class DashboardView extends FrameLayout {
                 View div = new View(ctx);
                 LinearLayout.LayoutParams dl;
                 if (bento) {
-                    dl = portrait ? new LinearLayout.LayoutParams(-1, px(12)) : new LinearLayout.LayoutParams(px(12), -1);
+                    dl = portrait ? new LinearLayout.LayoutParams(-1, px(14)) : new LinearLayout.LayoutParams(px(14), -1);
                 } else if (portrait) {
                     div.setBackgroundColor(th.line);
                     dl = new LinearLayout.LayoutParams(-1, Math.max(1, (int) dp));
@@ -466,9 +468,10 @@ public class DashboardView extends FrameLayout {
                 if (v == null) continue;
                 int h = b.optInt("h", Desks.defaultHeight(t));
                 if (h <= 0 && Desks.needsHeight(t)) h = 1;
-                if (bento && !"music".equals(t)) v = card(v, card, h > 0);
+                // music and weather draw their own backgrounds (the cover, the sky)
+                if (bento && !"music".equals(t) && !"weather".equals(t)) v = card(v, card, h > 0);
                 LinearLayout.LayoutParams lp = h > 0 ? new LinearLayout.LayoutParams(-1, 0, h) : new LinearLayout.LayoutParams(-1, -2);
-                if (colView.getChildCount() > 0) lp.topMargin = px(12);
+                if (colView.getChildCount() > 0) lp.topMargin = px(14);
                 colView.addView(v, lp);
             }
             int w = Math.max(1, col.optInt("w", 50));
@@ -478,8 +481,8 @@ public class DashboardView extends FrameLayout {
 
     private View card(View v, int color, boolean fill) {
         FrameLayout f = new FrameLayout(ctx);
-        f.setBackground(rounded(color, 22));
-        f.setPadding(px(14), px(12), px(14), px(12));
+        f.setBackground(rounded(color, Ui.R_WIDGET));
+        f.setPadding(px(18), px(16), px(18), px(16));
         f.addView(v, new FrameLayout.LayoutParams(-1, fill ? -1 : -2));
         return f;
     }
@@ -507,6 +510,7 @@ public class DashboardView extends FrameLayout {
         dockTime = null;
         ribbon = null;
         focusPills = null;
+        stack = null;
     }
 
     private View buildBlock(String type, JSONObject b) {
@@ -532,13 +536,19 @@ public class DashboardView extends FrameLayout {
         LinearLayout clockBox = vertical();
         clockBox.setGravity(centered ? Gravity.CENTER : Gravity.CENTER_VERTICAL);
         String style = prefs.clockStyle();
+        // as on the lock screen: the date sits above the time
+        dateText = text(th.text, centered ? 19 : 16);
+        dateText.setTypeface(Ui.font(600));
+        dateText.setAlpha(0.8f);
+        clockBox.addView(dateText, margins(-1, -2, 0, 0, 0, 0));
         if ("digital".equals(style)) {
             fancy = null;
             clock = text(th.text, 96);
             clock.setTypeface(clockFace());
             clock.setIncludeFontPadding(false);
             clock.setSingleLine();
-            clock.setLetterSpacing(prefs.clockFont().equals("mono") ? 0f : -0.02f);
+            String f = prefs.clockFont();
+            clock.setLetterSpacing(f.equals("mono") ? 0f : f.equals("apple") || f.equals("bold") ? -0.04f : -0.02f);
             clockBox.addView(clock);
         } else {
             clock = null;
@@ -546,10 +556,7 @@ public class DashboardView extends FrameLayout {
             fancy.setup(style, th, clockFace(), prefs.h24(), prefs.seconds());
             clockBox.addView(fancy, new LinearLayout.LayoutParams(-1, 0, 1));
         }
-        dateText = text(th.text, 20);
-        dateText.setTypeface(Typeface.create("sans-serif-light", Typeface.NORMAL));
-        clockBox.addView(dateText, margins(-1, -2, 0, 4, 0, 0));
-        hint = text(th.dim, 14);
+        hint = text(th.dim, 15);
         hint.setMaxLines(2);
         hint.setEllipsize(TextUtils.TruncateAt.END);
         hint.setLineSpacing(0, 1.15f);
@@ -600,7 +607,7 @@ public class DashboardView extends FrameLayout {
 
             @Override
             public boolean onSingleTapConfirmed(MotionEvent e) {
-                if ("focus".equals(look) || "night".equals(look)) peek();
+                if ("standby".equals(look) || "night".equals(look)) peek();
                 return true;
             }
 
@@ -625,11 +632,11 @@ public class DashboardView extends FrameLayout {
 
     private View buildMusic() {
         musicCard = new FrameLayout(ctx);
-        musicCard.setBackground(rounded(th.surface, 18));
+        musicCard.setBackground(rounded(th.surface, Ui.R_WIDGET));
         musicCard.setOutlineProvider(new ViewOutlineProvider() {
             @Override
             public void getOutline(View v, Outline o) {
-                o.setRoundRect(0, 0, v.getWidth(), v.getHeight(), 18 * dp);
+                o.setRoundRect(0, 0, v.getWidth(), v.getHeight(), Ui.R_WIDGET * dp);
             }
         });
         musicCard.setClipToOutline(true);
@@ -647,7 +654,7 @@ public class DashboardView extends FrameLayout {
         musicRow = new LinearLayout(ctx);
         musicRow.setOrientation(LinearLayout.HORIZONTAL);
         musicRow.setGravity(Gravity.CENTER_VERTICAL);
-        musicRow.setPadding(px(10), px(10), px(10), px(10));
+        musicRow.setPadding(px(12), px(12), px(14), px(12));
         musicCard.addView(musicRow, new FrameLayout.LayoutParams(-1, -2));
 
         art = new ImageView(ctx);
@@ -660,14 +667,14 @@ public class DashboardView extends FrameLayout {
         });
         art.setClipToOutline(true);
         art.setElevation(4 * dp);
-        musicRow.addView(art, new LinearLayout.LayoutParams(px(68), px(68)));
+        musicRow.addView(art, new LinearLayout.LayoutParams(px(72), px(72)));
 
         LinearLayout info = vertical();
-        mTitle = text(th.text, 15);
+        mTitle = text(th.text, 16);
         mTitle.setSingleLine();
         mTitle.setEllipsize(TextUtils.TruncateAt.END);
-        mTitle.setTypeface(Typeface.create("sans-serif-medium", Typeface.NORMAL));
-        mArtist = text(th.dim, 13);
+        mTitle.setTypeface(Ui.font(600));
+        mArtist = text(th.dim, 14);
         mArtist.setSingleLine();
         mArtist.setEllipsize(TextUtils.TruncateAt.END);
         info.addView(mTitle);
@@ -701,7 +708,7 @@ public class DashboardView extends FrameLayout {
 
     private View buildPc() {
         LinearLayout box = vertical();
-        pcStatus = text(th.dim, 12);
+        pcStatus = text(th.dim, 14);
         pcStatus.setSingleLine();
         pcStatus.setEllipsize(TextUtils.TruncateAt.END);
         pcStatus.setOnClickListener(v -> onPcStatusClick());
@@ -722,25 +729,25 @@ public class DashboardView extends FrameLayout {
 
         LinearLayout header = new LinearLayout(ctx);
         header.setGravity(Gravity.CENTER_VERTICAL);
-        ImageView prevBtn = iconButton(R.drawable.ic_chevron_left, th.dim, 32);
+        ImageView prevBtn = iconButton(R.drawable.ic_chevron_left, th.accent, 32);
         prevBtn.setOnClickListener(v -> navigate(-1));
         header.addView(prevBtn, new LinearLayout.LayoutParams(px(32), px(32)));
-        calTitle = text(th.dim, 12);
-        calTitle.setLetterSpacing(0.16f);
-        calTitle.setTypeface(Typeface.create("sans-serif-medium", Typeface.NORMAL));
+        calTitle = text(th.text, 19);
+        calTitle.setTypeface(Ui.font(700));
         calTitle.setSingleLine();
         calTitle.setOnClickListener(v -> goToday());
         header.addView(calTitle, margins(-2, -2, 2, 0, 2, 0));
-        ImageView nextBtn = iconButton(R.drawable.ic_chevron_right, th.dim, 32);
+        ImageView nextBtn = iconButton(R.drawable.ic_chevron_right, th.accent, 32);
         nextBtn.setOnClickListener(v -> navigate(1));
         header.addView(nextBtn, new LinearLayout.LayoutParams(px(32), px(32)));
-        calCount = text(th.dim, 12);
+        calCount = text(th.dim, 14);
         calCount.setSingleLine();
         calCount.setEllipsize(TextUtils.TruncateAt.END);
         header.addView(calCount, margins(0, -2, 6, 0, 6, 0, 1));
-        calMode = text(th.text, 12);
-        calMode.setPadding(px(12), px(5), px(12), px(5));
-        calMode.setBackground(rounded(th.surface, 12));
+        calMode = text(th.accent, 14);
+        calMode.setTypeface(Ui.font(600));
+        calMode.setPadding(px(14), px(6), px(14), px(6));
+        calMode.setBackground(rounded(Ui.fill(th), 100));
         calMode.setOnClickListener(v -> toggleMonth());
         header.addView(calMode);
         ImageView gear = iconButton(R.drawable.ic_more, th.dim, 34);
@@ -794,17 +801,16 @@ public class DashboardView extends FrameLayout {
         hOwners.add(monthView);
         frame.addView(monthView, new FrameLayout.LayoutParams(-1, -1));
 
-        emptyText = text(th.dim, 14);
+        emptyText = text(th.dim, 15);
         emptyText.setGravity(Gravity.CENTER);
-        emptyText.setPadding(px(24), px(10), px(24), px(10));
-        emptyText.setBackground(rounded(th.bg, 14));
+        emptyText.setPadding(px(18), px(8), px(18), px(8));
+        emptyText.setBackground(rounded(th.surface, 100));
         emptyText.setVisibility(GONE);
         frame.addView(emptyText, new FrameLayout.LayoutParams(-2, -2, Gravity.CENTER));
 
-        detail = text(th.text, 14);
-        detail.setPadding(px(14), px(12), px(14), px(12));
-        GradientDrawable d = rounded(th.surface, 14);
-        d.setStroke(Math.max(1, (int) dp), th.line);
+        detail = text(th.text, 15);
+        detail.setPadding(px(16), px(14), px(16), px(14));
+        GradientDrawable d = rounded(Ui.fill(th), Ui.R_TILE);
         detail.setBackground(d);
         detail.setVisibility(GONE);
         detail.setOnClickListener(v -> v.setVisibility(GONE));
@@ -898,9 +904,15 @@ public class DashboardView extends FrameLayout {
         } else if (fancy != null) {
             fancy.setTime(now.toLocalTime());
         }
-        String date = now.format(DateTimeFormatter.ofPattern("EEEE, d MMMM"));
-        dateText.setText(date.isEmpty() ? date : Character.toUpperCase(date.charAt(0)) + date.substring(1));
-        hint.setText("night".equals(look) ? nightText : nextHint());
+        dateText.setText(Ui.cap(now.format(DateTimeFormatter.ofPattern("EEEE, d MMMM", Ui.RU))));
+        String h = "night".equals(look) ? nightText : nextHint();
+        hint.setText(h);
+        // nothing ahead today: the digits get the room
+        int vis = h.isEmpty() ? GONE : VISIBLE;
+        if (hint.getVisibility() != vis) {
+            hint.setVisibility(vis);
+            post(this::sizeClock);
+        }
     }
 
     /** Digital clock as big as its block allows. */
@@ -913,9 +925,19 @@ public class DashboardView extends FrameLayout {
         float ems = prefs.seconds() ? 3.15f : 2.55f;
         if (!prefs.h24()) ems += 0.2f;
         if (prefs.clockFont().equals("mono")) ems *= 1.2f;
+        if (prefs.clockFont().equals("apple") || prefs.clockFont().equals("bold")) ems *= 1.06f;
         float size = Math.min(colW * 0.9f / ems, (portrait ? h * 0.45f : h) * (bigClock ? 0.4f : 0.25f));
-        // leave room for the date and the next-event hint under the digits
-        if (boxH > 0) size = Math.min(size, (boxH - px(weatherLine != null ? 106 : 70) - box.getPaddingTop() - box.getPaddingBottom()) / 1.1f);
+        // leave room for what shares the block with the digits: the date, the weather, the next event
+        if (boxH > 0) {
+            int others = 0;
+            for (int i = 0; i < ((LinearLayout) box).getChildCount(); i++) {
+                View o = ((LinearLayout) box).getChildAt(i);
+                if (o == clock || o.getVisibility() == GONE) continue;
+                LinearLayout.LayoutParams ol = (LinearLayout.LayoutParams) o.getLayoutParams();
+                others += Math.max(o.getHeight(), px(20)) + ol.topMargin + ol.bottomMargin;
+            }
+            size = Math.min(size, (boxH - others - box.getPaddingTop() - box.getPaddingBottom()) / 1.18f);
+        }
         clock.setTextSize(TypedValue.COMPLEX_UNIT_PX, Math.max(px(28), size));
     }
 
@@ -931,8 +953,9 @@ public class DashboardView extends FrameLayout {
             case "condensed": return Typeface.create("sans-serif-condensed-light", Typeface.NORMAL);
             case "serif": return Typeface.create("serif", Typeface.NORMAL);
             case "mono": return Typeface.create("monospace", Typeface.NORMAL);
-            case "bold": return Typeface.create("sans-serif-black", Typeface.NORMAL);
-            default: return Typeface.create("sans-serif-thin", Typeface.NORMAL);
+            case "bold": return Ui.font(800);
+            case "thin": return Typeface.create("sans-serif-thin", Typeface.NORMAL);
+            default: return Ui.font(600); // "apple": heavy rounded-looking digits, as in StandBy
         }
     }
 
@@ -1361,7 +1384,7 @@ public class DashboardView extends FrameLayout {
         LocalDate today = LocalDate.now();
         String title;
         if (monthMode) {
-            title = shownMonth.getMonth().getDisplayName(TextStyle.FULL_STANDALONE, Locale.getDefault())
+            title = shownMonth.getMonth().getDisplayName(TextStyle.FULL_STANDALONE, Ui.RU)
                     + (shownMonth.getYear() != today.getYear() ? " " + shownMonth.getYear() : "");
         } else if (shownDay.equals(today)) {
             title = "Сегодня";
@@ -1370,10 +1393,10 @@ public class DashboardView extends FrameLayout {
         } else if (shownDay.equals(today.minusDays(1))) {
             title = "Вчера";
         } else {
-            title = shownDay.format(DateTimeFormatter.ofPattern("EE, d MMMM"));
+            title = shownDay.format(DateTimeFormatter.ofPattern("EE, d MMMM", Ui.RU));
         }
-        calTitle.setText(title.toUpperCase(Locale.getDefault()));
-        calTitle.setTextColor(monthMode || shownDay.equals(today) ? th.dim : th.accent);
+        calTitle.setText(Ui.cap(title));
+        calTitle.setTextColor(monthMode || shownDay.equals(today) ? th.text : th.accent);
         calMode.setText(monthMode ? "День" : "Месяц");
     }
 
@@ -1404,11 +1427,12 @@ public class DashboardView extends FrameLayout {
                     continue;
                 }
                 int color = th.eventColor(e.color, e.title, prefs.googleColors() && !nightActive);
-                TextView chip = text(DashTheme.onColor(color), 12);
+                TextView chip = text(TimelineView.eventText(th, color), 13);
+                chip.setTypeface(Ui.font(600));
                 chip.setText(e.title);
                 chip.setSingleLine();
                 chip.setPadding(px(10), px(4), px(10), px(4));
-                chip.setBackground(rounded(color, 10));
+                chip.setBackground(rounded(TimelineView.eventFill(th, color, false), 8));
                 chip.setOnClickListener(v -> showDetail(e));
                 allDayRow.addView(chip, margins(-2, -2, 0, 0, 6, 0));
             }
@@ -1544,7 +1568,7 @@ public class DashboardView extends FrameLayout {
         showArt(bmp);
 
         int acc = artColor != null && !nightActive ? artColor : th.accent;
-        musicCard.setBackground(rounded(artColor != null && !nightActive ? DashTheme.blend(th.surface, acc, 0.14f) : th.surface, 18));
+        musicCard.setBackground(rounded(artColor != null && !nightActive ? DashTheme.blend(th.surface, acc, 0.14f) : th.surface, Ui.R_WIDGET));
         stylePlay(playing, acc);
         mBar.set(mBar.frac, th.line, acc);
         if (remote) {
@@ -2078,30 +2102,32 @@ public class DashboardView extends FrameLayout {
         if (macroRow == null) return;
         macroRow.removeAllViews();
         if (prefs.pcHost().isEmpty()) return;
-        for (PcClient.Macro m : macros) macroRow.addView(macroButton(m), macroParams());
+        for (int i = 0; i < macros.size(); i++) macroRow.addView(macroButton(macros.get(i), Ui.TILES[i % Ui.TILES.length]), macroParams());
     }
 
     private LinearLayout.LayoutParams macroParams() {
-        LinearLayout.LayoutParams lp = new LinearLayout.LayoutParams(px(62), px(56));
+        LinearLayout.LayoutParams lp = new LinearLayout.LayoutParams(px(76), px(64));
         lp.rightMargin = px(8);
         return lp;
     }
 
-    private View macroButton(PcClient.Macro m) {
+    /** A Shortcuts-widget tile: a colour of its own, a white glyph and the name; grey while the PC sleeps. */
+    private View macroButton(PcClient.Macro m, int color) {
         LinearLayout b = vertical();
-        b.setGravity(Gravity.CENTER);
-        b.setBackground(rounded(th.surface, 14));
-        b.setAlpha(pcOnline ? 1f : 0.4f);
+        b.setGravity(Gravity.START | Gravity.CENTER_VERTICAL);
+        b.setPadding(px(10), px(8), px(8), px(8));
+        int fg = pcOnline ? 0xFFFFFFFF : th.dim;
+        b.setBackground(rounded(pcOnline ? color : Ui.fill(th), 16));
         ImageView ic = new ImageView(ctx);
         ic.setImageResource(iconFor(m.icon));
-        ic.setImageTintList(ColorStateList.valueOf(th.text));
-        b.addView(ic, new LinearLayout.LayoutParams(px(22), px(22)));
-        TextView l = text(th.dim, 10);
+        ic.setImageTintList(ColorStateList.valueOf(fg));
+        b.addView(ic, new LinearLayout.LayoutParams(px(20), px(20)));
+        TextView l = text(fg, 12);
+        l.setTypeface(Ui.font(600));
         l.setSingleLine();
         l.setEllipsize(TextUtils.TruncateAt.END);
-        l.setGravity(Gravity.CENTER);
         l.setText(m.label);
-        b.addView(l, margins(-1, -2, 4, 4, 4, 0));
+        b.addView(l, margins(-1, -2, 0, 6, 0, 0));
         b.setOnClickListener(v -> onMacro(m, b, l));
         return b;
     }
@@ -2116,17 +2142,14 @@ public class DashboardView extends FrameLayout {
         if (m.confirm && b.getTag() == null) {
             b.setTag("armed");
             l.setText("Точно?");
-            l.setTextColor(th.accent);
             b.postDelayed(() -> {
                 b.setTag(null);
                 l.setText(m.label);
-                l.setTextColor(th.dim);
             }, 3000);
             return;
         }
         b.setTag(null);
         l.setText(m.label);
-        l.setTextColor(th.dim);
         io.execute(() -> {
             boolean ok = c.run(m.id);
             ui.post(() -> flash(b, ok));
@@ -2134,8 +2157,9 @@ public class DashboardView extends FrameLayout {
     }
 
     private void flash(View b, boolean ok) {
-        b.setBackground(rounded(DashTheme.blend(th.surface, ok ? th.accent : 0xFFE5534B, 0.45f), 14));
-        b.postDelayed(() -> b.setBackground(rounded(th.surface, 14)), 350);
+        Drawable was = b.getBackground();
+        b.setBackground(rounded(ok ? Ui.GREEN : Ui.RED, 16));
+        b.postDelayed(() -> b.setBackground(was), 350);
     }
 
     private void onPcStatusClick() {
@@ -2584,15 +2608,17 @@ public class DashboardView extends FrameLayout {
     }
 
     private void dayLine(LinearLayout list, String label, String value) {
+        LinearLayout g = group(list);
         LinearLayout r = new LinearLayout(ctx);
-        TextView l = text(th.dim, 13);
-        l.setText(label);
+        r.setPadding(px(16), px(11), px(16), px(11));
+        TextView l = text(th.text, 15);
+        l.setText(label.trim());
         r.addView(l, new LinearLayout.LayoutParams(0, -2, 1));
-        TextView v = text(th.text, 13);
+        TextView v = text(th.dim, 15);
         v.setText(value);
         v.setGravity(Gravity.END);
         r.addView(v, new LinearLayout.LayoutParams(0, -2, 1.4f));
-        list.addView(r, margins(-1, -2, 0, 3, 0, 3));
+        g.addView(r, new LinearLayout.LayoutParams(-1, -2));
     }
 
     private void countMusic() {
@@ -2632,12 +2658,13 @@ public class DashboardView extends FrameLayout {
         if (!prefs.live()) return;
         live = new LinearLayout(ctx);
         live.setGravity(Gravity.CENTER_VERTICAL);
-        live.setPadding(px(12), px(5), px(14), px(5));
-        live.setElevation(6 * dp);
+        live.setPadding(px(16), px(9), px(20), px(9));
+        live.setElevation(10 * dp);
         live.setVisibility(GONE);
         liveDot = new View(ctx);
-        live.addView(liveDot, margins(px(8), px(8), 0, 0, 8, 0));
-        liveText = text(th.text, 13);
+        live.addView(liveDot, margins(px(9), px(9), 0, 0, 10, 0));
+        liveText = text(0xFFFFFFFF, 14);
+        liveText.setTypeface(Ui.font(600));
         liveText.setSingleLine();
         liveText.setEllipsize(TextUtils.TruncateAt.END);
         liveText.setMaxWidth(px(460));
@@ -2742,7 +2769,9 @@ public class DashboardView extends FrameLayout {
         }
         liveAction = action;
         liveText.setText(text);
-        live.setBackground(rounded(DashTheme.blend(th.surface, color, 0.18f), 16));
+        GradientDrawable island = rounded(0xFF000000, 100);
+        if (!th.light) island.setStroke(Math.max(1, (int) dp), 0xFF2C2C2E);
+        live.setBackground(island);
         GradientDrawable g = new GradientDrawable();
         g.setShape(GradientDrawable.OVAL);
         g.setColor(color | 0xFF000000);
@@ -2762,17 +2791,15 @@ public class DashboardView extends FrameLayout {
         if (sheet != null) removeView(sheet);
         performHapticFeedback(HapticFeedbackConstants.VIRTUAL_KEY);
         sheet = new FrameLayout(ctx);
-        sheet.setBackgroundColor(0x99000000);
+        sheet.setBackgroundColor(0x80000000);
         sheet.setOnClickListener(v -> closeSheet());
 
         ScrollView sv = new ScrollView(ctx);
         sv.setVerticalScrollBarEnabled(false);
         sv.setClickable(true);
-        sv.setPadding(px(20), px(18), px(20), px(14));
-        GradientDrawable bg = rounded(th.surface, 22);
-        bg.setStroke(Math.max(1, (int) dp), th.line);
-        sv.setBackground(bg);
-        sv.setElevation(12 * dp);
+        sv.setPadding(px(18), px(20), px(18), px(12));
+        sv.setBackground(rounded(sheetColor(), 30));
+        sv.setElevation(16 * dp);
         sv.addView(body);
 
         int w = Math.min(px(420), (int) (getWidth() * 0.6f));
@@ -2796,23 +2823,58 @@ public class DashboardView extends FrameLayout {
         s.animate().alpha(0f).setDuration(140).withEndAction(() -> removeView(s)).start();
     }
 
+    /** Sheets sit on the grouped background in light themes and on the card colour in dark ones, as in iOS. */
+    private int sheetColor() {
+        return th.light ? th.bg : th.surface;
+    }
+
+    private int groupColor() {
+        return th.light ? th.surface : th.lifted().surface;
+    }
+
     /** A list of tappable rows for menus. */
     private LinearLayout menu(String title) {
         LinearLayout list = vertical();
-        TextView t = text(th.text, 18);
+        TextView t = text(th.text, 22);
         t.setText(title);
-        t.setTypeface(Typeface.create("sans-serif-medium", Typeface.NORMAL));
-        list.addView(t, margins(-1, -2, 0, 0, 0, 10));
+        t.setTypeface(Ui.font(700));
+        list.addView(t, margins(-1, -2, 4, 0, 0, 14));
         return list;
     }
 
+    /** Rows go into a rounded group with hairlines between them; anything else in between starts a new group. */
+    private LinearLayout group(LinearLayout list) {
+        View last = list.getChildCount() == 0 ? null : list.getChildAt(list.getChildCount() - 1);
+        if (last instanceof LinearLayout && "group".equals(last.getTag())) {
+            LinearLayout g = (LinearLayout) last;
+            View line = new View(ctx);
+            line.setBackgroundColor(th.line);
+            g.addView(line, margins(-1, Math.max(1, (int) (dp * 0.6f)), 16, 0, 0, 0));
+            return g;
+        }
+        LinearLayout g = vertical();
+        g.setTag("group");
+        g.setBackground(rounded(groupColor(), Ui.R_GROUP));
+        list.addView(g, margins(-1, -2, 0, 0, 0, 12));
+        return g;
+    }
+
     private void menuRow(LinearLayout list, String label, boolean selected, Runnable action) {
-        TextView r = text(selected ? th.accent : th.text, 15);
-        r.setText(label);
-        r.setPadding(px(14), px(12), px(14), px(12));
-        r.setBackground(rounded(selected ? DashTheme.blend(th.surface, th.accent, 0.22f) : th.bg, 14));
+        LinearLayout g = group(list);
+        LinearLayout r = new LinearLayout(ctx);
+        r.setGravity(Gravity.CENTER_VERTICAL);
+        r.setPadding(px(16), px(13), px(16), px(13));
+        TextView t = text(th.text, 16);
+        t.setText(label);
+        r.addView(t, new LinearLayout.LayoutParams(0, -2, 1));
+        if (selected) {
+            TextView ck = text(th.accent, 17);
+            ck.setText("✓");
+            ck.setTypeface(Ui.font(700));
+            r.addView(ck);
+        }
         r.setOnClickListener(v -> action.run());
-        list.addView(r, margins(-1, -2, 0, 0, 0, 6));
+        g.addView(r, new LinearLayout.LayoutParams(-1, -2));
     }
 
     private void openSettings() {
@@ -2885,9 +2947,9 @@ public class DashboardView extends FrameLayout {
         if (!hasBar) return;
         LinearLayout bar = new LinearLayout(ctx);
         bar.setGravity(Gravity.CENTER_VERTICAL);
-        bar.setPadding(px(10), 0, px(2), 0);
-        bar.setBackground(rounded(th.surface, 14));
-        bar.setAlpha(0.9f);
+        bar.setPadding(px(12), 0, px(4), 0);
+        bar.setBackground(rounded(th.surface, 100));
+        bar.setAlpha(0.92f);
         bar.setOnLongClickListener(v -> {
             openMenu();
             return true;
@@ -2906,7 +2968,7 @@ public class DashboardView extends FrameLayout {
                 View dot = new View(ctx);
                 GradientDrawable g = new GradientDrawable();
                 g.setShape(GradientDrawable.OVAL);
-                g.setColor(i == di ? th.accent : DashTheme.blend(th.line, th.dim, 0.5f));
+                g.setColor(i == di ? th.text : DashTheme.blend(th.surface, th.dim, 0.6f));
                 dot.setBackground(g);
                 hit.addView(dot, new FrameLayout.LayoutParams(px(7), px(7), Gravity.CENTER));
                 int idx = i;
@@ -2961,6 +3023,10 @@ public class DashboardView extends FrameLayout {
     // ---------------------------------------------------------------- weather
 
     private View buildWeather() {
+        return buildWeather(false);
+    }
+
+    private View buildWeather(boolean flat) {
         WeatherPanel p = new WeatherPanel(ctx, th, nightActive, new WeatherPanel.Listener() {
             @Override
             public void onTap() {
@@ -2972,7 +3038,7 @@ public class DashboardView extends FrameLayout {
             public void onSetup() {
                 openSettings();
             }
-        });
+        }, flat);
         hOwners.add(p.hourStrip());
         weatherPanels.add(p);
         return p;
@@ -3054,7 +3120,7 @@ public class DashboardView extends FrameLayout {
     // ---------------------------------------------------------------- looks: focus, night clock, dock, ribbon
 
     static final String[][] LOOKS = {
-            {"classic", "Колонки"}, {"bento", "Плитки"}, {"focus", "Фокус"}, {"dock", "Док"}, {"ribbon", "Лента дня"},
+            {"bento", "Виджеты"}, {"standby", "StandBy"}, {"dock", "Док"}, {"ribbon", "Лента дня"},
     };
 
     static String lookName(String id) {
@@ -3076,16 +3142,174 @@ public class DashboardView extends FrameLayout {
         openSheet(m);
     }
 
-    /** A big clock in the middle, the weather and the music under it; a tap shows the desks for a minute. */
-    private void buildFocus() {
+    /**
+     * StandBy, as on an iPhone on its stand: a big clock on the left, a stack of widgets on the right that is
+     * swiped up and down (calendar, weather, music, home, calls, the day). A tap on the clock shows the desks.
+     */
+    private void buildStandby(JSONArray desks) {
         bigClock = true;
-        content.setOrientation(LinearLayout.VERTICAL);
-        content.setGravity(Gravity.CENTER);
-        content.addView(buildClock(true), new LinearLayout.LayoutParams(-1, 0, 1));
-        focusPills = new LinearLayout(ctx);
-        focusPills.setGravity(Gravity.CENTER);
-        content.addView(focusPills, margins(-1, -2, 0, 8, 0, 8));
-        content.setOnClickListener(v -> peek());
+        content.setOrientation(LinearLayout.HORIZONTAL);
+        FrameLayout left = new FrameLayout(ctx);
+        left.setBackground(rounded(th.surface, Ui.R_WIDGET));
+        left.setPadding(px(18), px(16), px(18), px(16));
+        left.addView(buildClock(true), new FrameLayout.LayoutParams(-1, -1));
+        content.addView(left, new LinearLayout.LayoutParams(0, -1, 1));
+
+        List<String> kinds = standbyKinds();
+        int idx = Math.floorMod(prefs.standbyIndex(), kinds.size());
+        String kind = kinds.get(idx);
+        stack = new StackFrame(ctx, kinds.size());
+        boolean own = "weather".equals(kind) || "music".equals(kind);
+        if (!own) {
+            stack.setBackground(rounded(th.surface, Ui.R_WIDGET));
+            stack.setPadding(px(18), px(16), px(26), px(16));
+        }
+        View w;
+        if ("home".equals(kind)) {
+            List<String[]> fav = favourites(desks);
+            JSONObject b2 = new JSONObject();
+            try {
+                org.json.JSONArray items = new org.json.JSONArray();
+                for (String[] f : fav) items.put(new JSONObject().put("id", f[0]).put("n", f[1]));
+                b2.put("t", "home").put("title", "Дом").put("items", items);
+            } catch (Exception ignored) {
+                // constant keys
+            }
+            HomePanel hp = (HomePanel) buildHome(b2);
+            if (fav.isEmpty()) {
+                hp.setAuto();
+                hOwners.add(hp.roomStrip());
+            }
+            w = hp;
+        } else {
+            w = buildBlock(kind, new JSONObject());
+        }
+        if ("music".equals(kind)) {
+            FrameLayout.LayoutParams ml = new FrameLayout.LayoutParams(-1, -2, Gravity.CENTER_VERTICAL);
+            stack.addView(w, ml);
+        } else {
+            stack.addView(w, new FrameLayout.LayoutParams(-1, -1));
+        }
+        // the stack's dots on its right edge, as in StandBy; a tap on them shows the next widget
+        LinearLayout dots = vertical();
+        dots.setPadding(px(8), px(10), px(8), px(10));
+        dots.setOnClickListener(v -> swipeStack(1));
+        for (int i = 0; i < kinds.size(); i++) {
+            View d = new View(ctx);
+            GradientDrawable g = new GradientDrawable();
+            g.setShape(GradientDrawable.OVAL);
+            g.setColor(i == idx ? th.text : DashTheme.blend(th.surface, th.dim, 0.7f));
+            d.setBackground(g);
+            dots.addView(d, margins(px(6), px(6), 0, 3, 0, 3));
+        }
+        FrameLayout.LayoutParams dl = new FrameLayout.LayoutParams(-2, -2, Gravity.END | Gravity.CENTER_VERTICAL);
+        dl.rightMargin = own ? 0 : -px(24);
+        stack.addView(dots, dl);
+        ImageView more = iconButton(R.drawable.ic_more, th.dim, 30);
+        more.setOnClickListener(v -> openMenu());
+        FrameLayout.LayoutParams mlp = new FrameLayout.LayoutParams(px(30), px(30), Gravity.END | Gravity.TOP);
+        mlp.rightMargin = own ? px(4) : -px(20);
+        mlp.topMargin = own ? px(4) : -px(8);
+        stack.addView(more, mlp);
+        LinearLayout.LayoutParams sl = new LinearLayout.LayoutParams(0, -1, 1);
+        sl.leftMargin = px(16);
+        content.addView(stack, sl);
+    }
+
+    /** What the StandBy stack can show with this profile's setup. */
+    private List<String> standbyKinds() {
+        List<String> k = new ArrayList<>();
+        k.add("calendar");
+        if (Weather.configured(prefs)) k.add("weather");
+        k.add("music");
+        if (SmartHome.configured(prefs)) k.add("home");
+        k.add("calls");
+        k.add("stats");
+        return k;
+    }
+
+    private void swipeStack(int dir) {
+        performHapticFeedback(HapticFeedbackConstants.VIRTUAL_KEY);
+        prefs.setStandbyIndex(prefs.standbyIndex() + dir);
+        build();
+        if (stack != null) {
+            stack.setTranslationY(dir * stack.getHeight() * 0.3f + dir * px(60));
+            stack.setAlpha(0f);
+            stack.animate().translationY(0).alpha(1f).setDuration(240).start();
+        }
+    }
+
+    /** The StandBy stack: a vertical swipe that the widget under the finger can't scroll itself changes the widget. */
+    private final class StackFrame extends FrameLayout {
+        private final int count;
+        private float sx, sy;
+        private boolean swiping;
+
+        StackFrame(Context c, int count) {
+            super(c);
+            this.count = count;
+        }
+
+        @Override
+        public boolean onInterceptTouchEvent(MotionEvent e) {
+            if (count < 2) return false;
+            switch (e.getActionMasked()) {
+                case MotionEvent.ACTION_DOWN:
+                    sx = e.getX();
+                    sy = e.getY();
+                    swiping = false;
+                    return false;
+                case MotionEvent.ACTION_MOVE: {
+                    float dx = e.getX() - sx, dy = e.getY() - sy;
+                    if (Math.abs(dy) > 24 * dp && Math.abs(dy) > 2 * Math.abs(dx)
+                            && !scrollsUnder(this, e.getRawX(), e.getRawY(), dy > 0 ? -1 : 1)) {
+                        swiping = true;
+                        return true;
+                    }
+                    return false;
+                }
+                default:
+                    return false;
+            }
+        }
+
+        @Override
+        public boolean onTouchEvent(MotionEvent e) {
+            switch (e.getActionMasked()) {
+                case MotionEvent.ACTION_DOWN:
+                    sx = e.getX();
+                    sy = e.getY();
+                    return count > 1;
+                case MotionEvent.ACTION_MOVE:
+                    if (swiping) setTranslationY((e.getY() - sy) * 0.3f);
+                    return true;
+                case MotionEvent.ACTION_UP:
+                case MotionEvent.ACTION_CANCEL: {
+                    float dy = e.getY() - sy;
+                    boolean go = swiping && Math.abs(dy) > 50 * dp;
+                    swiping = false;
+                    if (go) swipeStack(dy < 0 ? 1 : -1);
+                    else animate().translationY(0).setDuration(160).start();
+                    return true;
+                }
+                default:
+                    return true;
+            }
+        }
+    }
+
+    /** Whether some view under the point can still scroll vertically in that direction. */
+    private static boolean scrollsUnder(View v, float rx, float ry, int direction) {
+        if (!v.isShown()) return false;
+        int[] loc = new int[2];
+        v.getLocationOnScreen(loc);
+        if (rx < loc[0] || rx >= loc[0] + v.getWidth() || ry < loc[1] || ry >= loc[1] + v.getHeight()) return false;
+        if (v.canScrollVertically(direction)) return true;
+        if (v instanceof android.view.ViewGroup) {
+            android.view.ViewGroup g = (android.view.ViewGroup) v;
+            for (int i = 0; i < g.getChildCount(); i++) if (scrollsUnder(g.getChildAt(i), rx, ry, direction)) return true;
+        }
+        return false;
     }
 
     private void renderFocusPills() {
@@ -3112,14 +3336,15 @@ public class DashboardView extends FrameLayout {
     }
 
     private TextView pill(String s, View.OnClickListener l) {
-        TextView t = text(th.text, 14);
+        TextView t = text(th.text, 15);
+        t.setTypeface(Ui.font(600));
         t.setText(s);
         t.setSingleLine();
         t.setEllipsize(TextUtils.TruncateAt.END);
-        t.setMaxWidth(px(320));
+        t.setMaxWidth(px(340));
         t.setGravity(Gravity.CENTER_VERTICAL);
-        t.setPadding(px(14), px(8), px(16), px(8));
-        t.setBackground(rounded(th.surface, 20));
+        t.setPadding(px(16), px(10), px(18), px(10));
+        t.setBackground(rounded(th.surface, 100));
         t.setOnClickListener(l);
         return t;
     }
@@ -3147,7 +3372,7 @@ public class DashboardView extends FrameLayout {
         LinearLayout rail = vertical();
         rail.setGravity(Gravity.CENTER_HORIZONTAL);
         rail.setPadding(0, px(12), 0, px(8));
-        rail.setBackground(rounded(th.surface, 22));
+        rail.setBackground(rounded(th.surface, Ui.R_WIDGET));
         dockTime = text(th.text, 16);
         dockTime.setTypeface(Typeface.create("sans-serif-medium", Typeface.NORMAL));
         dockTime.setOnLongClickListener(v -> {
@@ -3175,7 +3400,7 @@ public class DashboardView extends FrameLayout {
             LinearLayout item = vertical();
             item.setGravity(Gravity.CENTER_HORIZONTAL);
             ImageView ic = iconButton((int) pg[1], sel ? DashTheme.onColor(th.accent) : th.dim, 36);
-            if (sel) ic.setBackground(rounded(th.accent, 14));
+            if (sel) ic.setBackground(rounded(th.accent, 12));
             item.addView(ic, new LinearLayout.LayoutParams(px(46), px(32)));
             TextView l = text(sel ? th.text : th.dim, 10);
             l.setText((String) pg[2]);
@@ -3276,7 +3501,7 @@ public class DashboardView extends FrameLayout {
         words.addView(hint);
         top.addView(words, margins(0, -2, 18, 0, 12, 0, 1));
         if (Weather.configured(prefs)) {
-            View wp = buildWeather();
+            View wp = buildWeather(true);
             ((WeatherPanel) wp).compact();
             top.addView(wp, new LinearLayout.LayoutParams(px(280), -2));
         }
@@ -3340,8 +3565,7 @@ public class DashboardView extends FrameLayout {
         if (!e.calendar.isEmpty()) dayLine(m, "Календарь", e.calendar);
         Meetings.Meeting mt = Meetings.of(e);
         if (mt != null && e.end > System.currentTimeMillis()) {
-            TextView gap = text(th.dim, 4);
-            m.addView(gap);
+            m.addView(caption("ПОДКЛЮЧИТЬСЯ"));
             if (pcOnline) menuRow(m, "Подключиться на ПК · " + mt.platform.name, false, () -> {
                 closeSheet();
                 joinMeeting(mt, true);
@@ -3379,6 +3603,9 @@ public class DashboardView extends FrameLayout {
         long stamp = d == null ? 0 : d.getTimestamp();
         if (stamp == clipStamp) return;
         clipStamp = stamp;
+        // a clip already looked at (also before a restart) is not read again
+        if (stamp == prefs.raw().getLong("clip_seen", 0)) return;
+        prefs.raw().edit().putLong("clip_seen", stamp).apply();
         // Android tells the user each time the clipboard is read: only look at something copied in the last half hour
         if (d != null && System.currentTimeMillis() - stamp > 30 * 60_000L) d = null;
         Meetings.Meeting m = null;
@@ -3407,8 +3634,8 @@ public class DashboardView extends FrameLayout {
         field.setTextColor(th.text);
         field.setSingleLine();
         field.setInputType(InputType.TYPE_CLASS_TEXT | InputType.TYPE_TEXT_VARIATION_URI);
-        field.setBackground(rounded(th.bg, 14));
-        field.setPadding(px(14), px(10), px(14), px(10));
+        field.setBackground(rounded(groupColor(), Ui.R_GROUP));
+        field.setPadding(px(16), px(12), px(16), px(12));
         if (clipLink != null) field.setText(clipLink.url);
         field.addTextChangedListener(new TextWatcher() {
             @Override
@@ -3425,11 +3652,9 @@ public class DashboardView extends FrameLayout {
         });
         m.addView(field, margins(-1, -2, 0, 0, 0, 8));
         LinearLayout btns = new LinearLayout(ctx);
-        TextView phone = pill("С телефона", v -> joinQuick(field.getText().toString(), false));
-        phone.setTextColor(DashTheme.onColor(th.accent));
-        phone.setBackground(rounded(th.accent, 20));
+        TextView phone = Ui.pill(ctx, "С телефона", Ui.GREEN, 0xFFFFFFFF, v -> joinQuick(field.getText().toString(), false));
         btns.addView(phone, margins(-2, -2, 0, 0, 8, 0));
-        if (pcOnline) btns.addView(pill("На компьютере", v -> joinQuick(field.getText().toString(), true)));
+        if (pcOnline) btns.addView(Ui.pill(ctx, "На компьютере", groupColor(), th.accent, v -> joinQuick(field.getText().toString(), true)));
         m.addView(btns, margins(-1, -2, 0, 0, 0, 12));
         try {
             JSONArray r = new JSONArray(prefs.callRecent());
@@ -3455,10 +3680,9 @@ public class DashboardView extends FrameLayout {
     }
 
     private TextView caption(String s) {
-        TextView t = text(th.dim, 11);
+        TextView t = text(th.dim, 13);
         t.setText(s);
-        t.setLetterSpacing(0.12f);
-        t.setPadding(px(4), px(8), 0, px(6));
+        t.setPadding(px(16), px(4), 0, px(6));
         return t;
     }
 
@@ -3561,7 +3785,7 @@ public class DashboardView extends FrameLayout {
         if (content == null) return;
         int base = "bento".equals(look) || "dock".equals(look) ? px(14) : px(22);
         // the live strip takes the top edge: blocks move down instead of hiding under it
-        int top = live != null && live.getVisibility() == VISIBLE ? px(40) : px(16);
+        int top = live != null && live.getVisibility() == VISIBLE ? px(50) : px(16);
         content.setPadding(base + cutL, top + cutT, base + cutR, (hasBar ? px(34) : px(16)) + cutB);
     }
 
@@ -3671,13 +3895,13 @@ public class DashboardView extends FrameLayout {
         @Override
         protected void onDraw(Canvas c) {
             float w = getWidth(), h = getHeight(), r = w / 2, top = 22 * dp;
-            p.setColor(th.surface);
-            c.drawRoundRect(0, top, w, h, r, r, p);
+            p.setColor(th.light ? 0xE6FFFFFF : 0xE62C2C2E);
+            c.drawRoundRect(0, top, w, h, r * 0.7f, r * 0.7f, p);
             c.save();
             android.graphics.Path clip = new android.graphics.Path();
-            clip.addRoundRect(0, top, w, h, r, r, android.graphics.Path.Direction.CW);
+            clip.addRoundRect(0, top, w, h, r * 0.7f, r * 0.7f, android.graphics.Path.Direction.CW);
             c.clipPath(clip);
-            p.setColor(th.accent);
+            p.setColor(th.light ? 0xFF1C1C1E : 0xFFFFFFFF);
             c.drawRect(0, h - (h - top) * value, w, h, p);
             c.restore();
             p.setColor(th.text);
@@ -3685,7 +3909,7 @@ public class DashboardView extends FrameLayout {
             if (icon != null) {
                 int s = (int) (22 * dp), x = (int) (w / 2 - s / 2f), y = (int) (h - s - 12 * dp);
                 icon.setBounds(x, y, x + s, y + s);
-                icon.setTint(value > 0.12f ? DashTheme.onColor(th.accent) : th.text);
+                icon.setTint(value > 0.12f ? (th.light ? 0xFFFFFFFF : 0xFF1C1C1E) : th.text);
                 icon.draw(c);
             }
         }

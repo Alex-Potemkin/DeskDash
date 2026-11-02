@@ -29,7 +29,8 @@ import java.util.Set;
 
 /** Desks of the active profile: add / rename / reorder desks, columns and blocks, pick smart home devices. */
 public class DeskEditorActivity extends Activity {
-    private static final int ACCENT = 0xFFC8A27C, TEXT = 0xFFF1E6DA, DIM = 0xFF9C8B7E, SURFACE = 0xFF231B17, BG = 0xFF17120F;
+    private DashTheme th;
+    private int ACCENT, TEXT, DIM, SURFACE, BG;
 
     private Prefs prefs;
     private JSONArray desks;
@@ -44,8 +45,17 @@ public class DeskEditorActivity extends Activity {
         dp = getResources().getDisplayMetrics().density;
         desks = Desks.load(prefs);
         sel = Math.max(0, Math.min(prefs.deskIndex(), desks.length() - 1));
-        setTitle("Столы · " + Profiles.name(this, Profiles.active(this)));
+        th = DashTheme.byId(prefs.theme());
+        ACCENT = th.accent;
+        TEXT = th.text;
+        DIM = th.dim;
+        SURFACE = th.surface;
+        BG = th.bg;
+        getWindow().setStatusBarColor(BG);
+        getWindow().setNavigationBarColor(BG);
+        if (th.light) getWindow().getDecorView().setSystemUiVisibility(View.SYSTEM_UI_FLAG_LIGHT_STATUS_BAR);
         ScrollView sv = new ScrollView(this);
+        sv.setBackgroundColor(BG);
         root = new LinearLayout(this);
         root.setOrientation(LinearLayout.VERTICAL);
         root.setPadding(px(20), px(8), px(20), px(40));
@@ -398,10 +408,8 @@ public class DeskEditorActivity extends Activity {
     }
 
     private void section(String title) {
-        TextView t = text(title, 13, ACCENT);
-        t.setTypeface(Typeface.create("sans-serif-medium", Typeface.NORMAL));
-        t.setLetterSpacing(0.12f);
-        t.setAllCaps(true);
+        TextView t = text(title.toUpperCase(java.util.Locale.getDefault()), 13, DIM);
+        t.setPadding(px(16), 0, 0, 0);
         root.addView(t, lp(24, 8));
     }
 
@@ -426,15 +434,11 @@ public class DeskEditorActivity extends Activity {
     }
 
     private TextView chip(String label, boolean selected, View.OnClickListener l) {
-        TextView t = text(label, 14, selected ? BG : TEXT);
+        TextView t = text(label, 15, selected ? DashTheme.onColor(ACCENT) : TEXT);
         t.setSingleLine();
-        t.setPadding(px(14), px(9), px(14), px(9));
-        t.setBackground(rounded(selected ? ACCENT : SURFACE, 14));
-        if (!selected) {
-            GradientDrawable g = rounded(SURFACE, 14);
-            g.setStroke(Math.max(1, (int) dp), 0xFF3A2E28);
-            t.setBackground(g);
-        }
+        t.setTypeface(Ui.font(selected ? 600 : 400));
+        t.setPadding(px(14), px(8), px(14), px(8));
+        t.setBackground(rounded(selected ? ACCENT : Ui.fill(th), 100));
         t.setOnClickListener(l);
         return t;
     }
@@ -442,7 +446,8 @@ public class DeskEditorActivity extends Activity {
     private TextView small(String label, View.OnClickListener l) {
         TextView t = text(label, 16, TEXT);
         t.setGravity(Gravity.CENTER);
-        t.setBackground(rounded(0xFF2E2420, 10));
+        t.setTextColor(ACCENT);
+        t.setBackground(rounded(Ui.fill(th), 100));
         t.setOnClickListener(l);
         LinearLayout.LayoutParams lp = new LinearLayout.LayoutParams(px(34), px(34));
         lp.rightMargin = px(6);

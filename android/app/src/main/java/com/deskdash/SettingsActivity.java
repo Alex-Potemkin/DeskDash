@@ -18,13 +18,12 @@ import android.text.TextWatcher;
 import android.util.TypedValue;
 import android.view.Gravity;
 import android.view.View;
-import android.widget.Button;
 import android.widget.EditText;
+import android.widget.FrameLayout;
 import android.widget.HorizontalScrollView;
 import android.widget.ImageView;
 import android.widget.LinearLayout;
 import android.widget.ScrollView;
-import android.widget.Switch;
 import android.widget.TextView;
 import android.widget.Toast;
 
@@ -36,13 +35,33 @@ import java.util.List;
 import java.util.Locale;
 
 /**
- * Settings of the active profile. The first page is a map: search, the profile, and sections with
- * what is set up in each of them right now; a section opens its own short page.
+ * Settings of the active profile, laid out like iOS Settings: a large title, grouped rounded lists with
+ * coloured icon squares, iOS switches, explanations under the groups. The first page is a map: search,
+ * the profile, and sections with what is set up in each of them right now; a section opens its own page.
+ * Colours follow the profile's theme, light or dark.
  */
 public class SettingsActivity extends Activity {
     static final String EXTRA_PAGE = "page";
-    private static final int ACCENT = 0xFFC8A27C, TEXT = 0xFFF1E6DA, DIM = 0xFF9C8B7E, SURFACE = 0xFF231B17,
-            BG = 0xFF17120F, LINE = 0xFF2E2420;
+    /** The profile's theme, set in onCreate. */
+    private DashTheme th;
+    private int ACCENT, TEXT, DIM, SURFACE, BG, LINE;
+
+    /** Colour of each section's icon square, as in iOS Settings. */
+    private static int iconColor(String id) {
+        switch (id) {
+            case "look": return Ui.BLUE;
+            case "desks": return Ui.INDIGO;
+            case "screen": return Ui.PURPLE;
+            case "weather": return Ui.TEAL;
+            case "calendar": return Ui.RED;
+            case "calls": return Ui.GREEN;
+            case "music": return Ui.PINK;
+            case "stats": return Ui.ORANGE;
+            case "pc": return Ui.GRAY;
+            case "home": return Ui.ORANGE;
+            default: return Ui.BROWN;
+        }
+    }
 
     /** id, title, icon, words to search for. */
     private static final Object[][] PAGES = {
@@ -73,20 +92,36 @@ public class SettingsActivity extends Activity {
         sp = prefs.raw();
         dp = getResources().getDisplayMetrics().density;
         page = getIntent().getStringExtra(EXTRA_PAGE);
+        th = DashTheme.byId(prefs.theme());
+        ACCENT = th.accent;
+        TEXT = th.text;
+        DIM = th.dim;
+        SURFACE = th.surface;
+        BG = th.bg;
+        LINE = th.line;
+        getWindow().setStatusBarColor(BG);
+        getWindow().setNavigationBarColor(BG);
+        getWindow().getDecorView().setBackgroundColor(BG);
+        if (th.light) {
+            getWindow().getDecorView().setSystemUiVisibility(View.SYSTEM_UI_FLAG_LIGHT_STATUS_BAR
+                    | (android.os.Build.VERSION.SDK_INT >= 26 ? View.SYSTEM_UI_FLAG_LIGHT_NAVIGATION_BAR : 0));
+        }
         ScrollView sv = new ScrollView(this);
+        sv.setBackgroundColor(BG);
         list = new LinearLayout(this);
         list.setOrientation(LinearLayout.VERTICAL);
-        int p = px(24);
-        list.setPadding(p, px(12), p, px(40));
-        sv.addView(list);
+        // a column of readable width in the middle, as iPad Settings do in landscape
+        list.setPadding(px(20), px(8), px(20), px(48));
+        FrameLayout center = new FrameLayout(this);
+        center.addView(list, new FrameLayout.LayoutParams(Math.min(getResources().getDisplayMetrics().widthPixels, px(720)), -2,
+                Gravity.CENTER_HORIZONTAL));
+        sv.addView(center);
         setContentView(sv);
-        if (page == null) {
-            setTitle("Настройки · " + Profiles.name(this, Profiles.active(this)));
-            home();
-        } else {
-            for (Object[] pg : PAGES) if (pg[0].equals(page)) setTitle((String) pg[1]);
-            build(page);
-        }
+        String title = "Настройки";
+        if (page != null) for (Object[] pg : PAGES) if (pg[0].equals(page)) title = (String) pg[1];
+        navBar(page == null ? null : "Настройки", title);
+        if (page == null) home();
+        else build(page);
     }
 
     @Override
@@ -125,21 +160,21 @@ public class SettingsActivity extends Activity {
 
     private void home() {
         EditText search = new EditText(this);
-        search.setHint("Поиск: тема, яркость, Zoom, принтер…");
-        search.setHintTextColor(0xFF6B5D52);
+        search.setHint("Поиск");
+        search.setHintTextColor(DIM);
         search.setTextColor(TEXT);
         search.setSingleLine();
-        search.setTextSize(TypedValue.COMPLEX_UNIT_SP, 15);
-        search.setBackground(round(SURFACE, 22));
-        search.setPadding(px(16), px(12), px(16), px(12));
-        search.setCompoundDrawablePadding(px(10));
+        search.setTextSize(TypedValue.COMPLEX_UNIT_SP, 17);
+        search.setBackground(round(th.light ? 0xFFE3E3E8 : SURFACE, 11));
+        search.setPadding(px(10), px(8), px(12), px(8));
+        search.setCompoundDrawablePadding(px(6));
         android.graphics.drawable.Drawable icon = getDrawable(R.drawable.ic_search);
         if (icon != null) {
             icon.setTint(DIM);
             icon.setBounds(0, 0, px(20), px(20));
             search.setCompoundDrawablesRelative(icon, null, null, null);
         }
-        add(search, 4, 6);
+        list.addView(search, lpm(0, 8));
         results = new LinearLayout(this);
         results.setOrientation(LinearLayout.VERTICAL);
         list.addView(results);
@@ -162,7 +197,7 @@ public class SettingsActivity extends Activity {
         LinearLayout keep = list;
         list = cards;
         profileCard();
-        group("ЭКРАН");
+        section("Экран");
         pageCard("look", DashboardView.lookName(prefs.uiStyle()) + " · " + DashTheme.byId(prefs.theme()).name + " · " + FancyClock.name(prefs.clockStyle()) + " часы");
         JSONArray desks = Desks.load(prefs);
         int blocks = 0;
@@ -175,7 +210,7 @@ public class SettingsActivity extends Activity {
         }
         pageCard("desks", plural(desks.length(), "стол", "стола", "столов") + " · " + plural(blocks, "блок", "блока", "блоков"));
         pageCard("screen", nightSummary() + (prefs.live() ? " · живая строка" : ""));
-        group("ДАННЫЕ");
+        section("Данные");
         pageCard("weather", Weather.configured(prefs) ? Weather.place(prefs) : "город не выбран");
         String cal = prefs.calSource();
         pageCard("calendar", "ics".equals(cal) ? icsCount() : !CalendarRepo.hasPermission(this) ? "нет доступа — нажми, чтобы дать"
@@ -183,7 +218,7 @@ public class SettingsActivity extends Activity {
         pageCard("calls", "напомнить за " + prefs.callRemind() + " мин · подключаться " + ("pc".equals(prefs.callJoin()) ? "на ПК" : "с телефона"));
         pageCard("music", MusicWatcher.hasAccess(this) ? "доступ есть" : "нужен доступ к уведомлениям");
         pageCard("stats", prefs.pcHost().isEmpty() ? "музыка и умный дом; ПК не подключён" : "ПК, созвоны, музыка, умный дом");
-        group("ПОДКЛЮЧЕНИЯ");
+        section("Подключения");
         pageCard("pc", prefs.pcHost().isEmpty() ? "не подключён" : prefs.pcHost() + (prefs.pcToken().isEmpty() ? " · нет токена" : ""));
         StringBuilder h = new StringBuilder();
         if (HubClient.configured(prefs)) h.append("через хаб");
@@ -194,7 +229,7 @@ public class SettingsActivity extends Activity {
         pageCard("home", h.length() == 0 ? "не подключён" : h.toString());
         List<Bambu.Config> pr = Bambu.load(prefs);
         pageCard("printer", pr.isEmpty() ? "Bambu Lab по сети или из Home Assistant" : pr.get(0).name + (pr.size() > 1 ? " и ещё " + (pr.size() - 1) : ""));
-        group("");
+        section("");
         button("Настроить всё по шагам (мастер)", v -> startActivity(new Intent(this, WelcomeActivity.class)
                 .putExtra(WelcomeActivity.EXTRA_TOUR, true)));
         button("Найти всё в сети: ПК, хаб, Home Assistant, принтер", v -> Setup.findAll(this, prefs, this::recreate));
@@ -254,29 +289,22 @@ public class SettingsActivity extends Activity {
         return sb.toString();
     }
 
-    private void group(String title) {
-        TextView t = text(title, 12, DIM);
-        t.setLetterSpacing(0.14f);
-        add(t, 22, 6);
-    }
-
     private void pageCard(String id, String status) {
         Object[] pg = null;
         for (Object[] x : PAGES) if (x[0].equals(id)) pg = x;
         if (pg == null) return;
         LinearLayout r = new LinearLayout(this);
         r.setGravity(Gravity.CENTER_VERTICAL);
-        r.setPadding(px(12), px(12), px(14), px(12));
-        r.setBackground(round(SURFACE, 16));
+        r.setPadding(px(14), px(10), px(14), px(10));
         ImageView ic = new ImageView(this);
         ic.setImageResource((int) pg[2]);
-        ic.setImageTintList(ColorStateList.valueOf(ACCENT));
-        ic.setPadding(px(8), px(8), px(8), px(8));
-        ic.setBackground(round(BG, 12));
-        r.addView(ic, new LinearLayout.LayoutParams(px(40), px(40)));
+        ic.setImageTintList(ColorStateList.valueOf(0xFFFFFFFF));
+        ic.setPadding(px(5), px(5), px(5), px(5));
+        ic.setBackground(round(iconColor(id), 8));
+        r.addView(ic, new LinearLayout.LayoutParams(px(30), px(30)));
         LinearLayout t = new LinearLayout(this);
         t.setOrientation(LinearLayout.VERTICAL);
-        TextView a = text((String) pg[1], 16, TEXT);
+        TextView a = text((String) pg[1], 17, TEXT);
         t.addView(a);
         TextView b = text(status, 13, DIM);
         b.setSingleLine();
@@ -285,9 +313,9 @@ public class SettingsActivity extends Activity {
         LinearLayout.LayoutParams tl = new LinearLayout.LayoutParams(0, -2, 1);
         tl.setMargins(px(14), 0, px(8), 0);
         r.addView(t, tl);
-        r.addView(text("›", 24, DIM));
+        r.addView(chevron());
         r.setOnClickListener(v -> openPage(id));
-        add(r, 0, 8);
+        addRow(r, 58);
     }
 
     private void profileCard() {
@@ -295,23 +323,25 @@ public class SettingsActivity extends Activity {
         String act = Profiles.active(this);
         LinearLayout card = new LinearLayout(this);
         card.setOrientation(LinearLayout.VERTICAL);
-        card.setPadding(px(14), px(12), px(14), px(10));
-        card.setBackground(round(SURFACE, 16));
+        card.setPadding(px(16), px(14), px(16), px(12));
         LinearLayout top = new LinearLayout(this);
         top.setGravity(Gravity.CENTER_VERTICAL);
         String name = Profiles.name(this, act);
-        TextView av = text(name.isEmpty() ? "?" : name.substring(0, 1).toUpperCase(Locale.getDefault()), 18, 0xFF1E1714);
+        TextView av = text(name.isEmpty() ? "?" : name.substring(0, 1).toUpperCase(Locale.getDefault()), 24, 0xFFFFFFFF);
         av.setGravity(Gravity.CENTER);
-        av.setTypeface(Typeface.create("sans-serif-medium", Typeface.NORMAL));
+        av.setTypeface(Ui.font(600));
         GradientDrawable g = new GradientDrawable();
         g.setShape(GradientDrawable.OVAL);
-        g.setColor(ACCENT);
+        g.setColors(new int[]{DashTheme.blend(ACCENT, 0xFFFFFFFF, 0.25f), ACCENT});
+        g.setOrientation(GradientDrawable.Orientation.TOP_BOTTOM);
         av.setBackground(g);
-        top.addView(av, new LinearLayout.LayoutParams(px(40), px(40)));
+        top.addView(av, new LinearLayout.LayoutParams(px(58), px(58)));
         LinearLayout t = new LinearLayout(this);
         t.setOrientation(LinearLayout.VERTICAL);
-        t.addView(text(name, 17, TEXT));
-        t.addView(text("Профиль: свои тема, столы, календарь, ПК и умный дом", 12, DIM));
+        TextView nm = text(name, 21, TEXT);
+        nm.setTypeface(Ui.font(600));
+        t.addView(nm);
+        t.addView(text("Профиль: своя тема, столы, календарь, ПК и умный дом", 13, DIM));
         LinearLayout.LayoutParams tl = new LinearLayout.LayoutParams(0, -2, 1);
         tl.leftMargin = px(14);
         top.addView(t, tl);
@@ -338,9 +368,8 @@ public class SettingsActivity extends Activity {
                     recreate();
                 })
                 .setNegativeButton("Отмена", null).show()), chipLp());
-        for (int i = 0; i < row.getChildCount(); i++) row.getChildAt(i).setBackground(round(BG, 18));
-        card.addView(scroll(row), lpm(10, 0));
-        add(card, 6, 4);
+        card.addView(scroll(row), lpm(12, 0));
+        addRow(card, 0);
     }
 
     private void newProfile() {
@@ -382,13 +411,14 @@ public class SettingsActivity extends Activity {
             LinearLayout card = new LinearLayout(this);
             card.setOrientation(LinearLayout.VERTICAL);
             card.setPadding(px(6), px(6), px(6), px(8));
-            GradientDrawable bg = round(SURFACE, 14);
-            bg.setStroke(px(sel ? 2 : 1), sel ? ACCENT : LINE);
+            GradientDrawable bg = round(BG, 16);
+            bg.setStroke(px(sel ? 2.5f : 1), sel ? ACCENT : LINE);
             card.setBackground(bg);
             Presets.LookPreview pv = new Presets.LookPreview(this);
             pv.set(l[0], DashTheme.byId(prefs.theme()));
             card.addView(pv, new LinearLayout.LayoutParams(px(150), px(84)));
-            TextView n = text(l[1], 13, sel ? ACCENT : TEXT);
+            TextView n = text(l[1], 14, sel ? ACCENT : TEXT);
+            n.setTypeface(Ui.font(sel ? 600 : 400));
             n.setGravity(Gravity.CENTER);
             card.addView(n, lpm(6, 0));
             card.setOnClickListener(v -> {
@@ -405,7 +435,7 @@ public class SettingsActivity extends Activity {
         JSONObject desk = Desks.load(prefs).optJSONObject(Math.max(0, Math.min(prefs.deskIndex(), Desks.load(prefs).length() - 1)));
         for (DashTheme t : DashTheme.ALL) {
             if (t.isNight()) continue;
-            boolean sel = t.id.equals(prefs.theme());
+            boolean sel = t.id.equals(th.id);
             LinearLayout card = new LinearLayout(this);
             card.setOrientation(LinearLayout.VERTICAL);
             card.setPadding(px(6), px(6), px(6), px(8));
@@ -431,7 +461,7 @@ public class SettingsActivity extends Activity {
         chips("clock_style", "digital", FancyClock.STYLES);
         note("Свайп по часам влево/вправо тоже меняет стиль.");
         label("Шрифт цифр");
-        chips("clock_font", "thin", new String[][]{{"thin", "Тонкий"}, {"light", "Лёгкий"},
+        chips("clock_font", "apple", new String[][]{{"apple", "Как в iPhone"}, {"thin", "Тонкий"}, {"light", "Лёгкий"},
                 {"condensed", "Узкий"}, {"serif", "С засечками"}, {"mono", "Моно"}, {"bold", "Жирный"}});
         toggle("h24", "24-часовой формат", true);
         toggle("seconds", "Показывать секунды", false);
@@ -443,13 +473,13 @@ public class SettingsActivity extends Activity {
 
     static String lookAbout(String id) {
         switch (id) {
-            case "bento": return "Плитки: каждый блок на своей карточке, столы те же, что в «Столах и блоках».";
-            case "focus": return "Фокус: большие часы, погода и музыка. Тап — столы на минуту, потом снова часы.";
+            case "standby": return "StandBy, как у iPhone на подставке: большие часы слева, справа стопка виджетов — "
+                    + "календарь, погода, музыка, дом, созвоны, день — листается вверх и вниз. Тап по часам — столы на минуту.";
             case "dock": return "Док: слева разделы (Стол, Дом, Календарь, Созвоны, Погода, Музыка, День), справа один раздел целиком. "
                     + "«Дом» показывает все устройства по комнатам.";
             case "ribbon": return "Лента дня: часы и погода сверху, ближайшие часы полосой с событиями и прогнозом, "
                     + "внизу музыка и избранные плитки умного дома.";
-            default: return "Колонки: столы из «Столов и блоков», как раньше.";
+            default: return "Виджеты: каждый блок — отдельный виджет, столы из «Столов и блоков» листаются вбок.";
         }
     }
 
@@ -469,7 +499,7 @@ public class SettingsActivity extends Activity {
             LinearLayout card = new LinearLayout(this);
             card.setOrientation(LinearLayout.VERTICAL);
             card.setPadding(px(8), px(8), px(8), px(10));
-            card.setBackground(round(SURFACE, 16));
+            card.setBackground(round(BG, 16));
             Presets.Preview pv = new Presets.Preview(this);
             pv.set(p, DashTheme.byId(prefs.theme()));
             card.addView(pv, new LinearLayout.LayoutParams(px(190), px(96)));
@@ -811,15 +841,14 @@ public class SettingsActivity extends Activity {
         String names = sp.getString(key + "_names", "");
         LinearLayout r = new LinearLayout(this);
         r.setGravity(Gravity.CENTER_VERTICAL);
-        r.setPadding(px(14), px(10), px(10), px(10));
-        r.setBackground(round(SURFACE, 14));
+        r.setPadding(px(16), px(10), px(12), px(10));
         LinearLayout t = new LinearLayout(this);
         t.setOrientation(LinearLayout.VERTICAL);
-        t.addView(text(title, 15, TEXT));
+        t.addView(text(title, 16, TEXT));
         t.addView(text(sp.getString(key, "").isEmpty() ? "не выбрано" : names, 12, sp.getString(key, "").isEmpty() ? DIM : ACCENT));
         r.addView(t, new LinearLayout.LayoutParams(0, -2, 1));
         r.addView(chip("Выбрать", false, v -> pickAuto(title, key, multi, filter)));
-        add(r, 6, 4);
+        addRow(r, 0);
     }
 
     private void pickAuto(String title, String key, boolean multi, DeviceFilter filter) {
@@ -879,11 +908,10 @@ public class SettingsActivity extends Activity {
         for (Bambu.Config c : list0) {
             LinearLayout r = new LinearLayout(this);
             r.setGravity(Gravity.CENTER_VERTICAL);
-            r.setPadding(px(14), px(10), px(10), px(10));
-            r.setBackground(round(SURFACE, 14));
+            r.setPadding(px(16), px(10), px(12), px(10));
             LinearLayout t = new LinearLayout(this);
             t.setOrientation(LinearLayout.VERTICAL);
-            t.addView(text(c.name, 15, TEXT));
+            t.addView(text(c.name, 16, TEXT));
             t.addView(text(c.host + " · " + c.serial, 12, DIM));
             r.addView(t, new LinearLayout.LayoutParams(0, -2, 1));
             r.addView(chip("Изменить", false, v -> Setup.printerForm(this, prefs, new String[]{c.host, c.serial, c.name, c.code}, this::recreate)));
@@ -893,7 +921,7 @@ public class SettingsActivity extends Activity {
                 Bambu.save(prefs, l);
                 recreate();
             }));
-            add(r, 4, 4);
+            addRow(r, 0);
         }
         primary("Найти принтер", v -> Setup.findPrinter(this, prefs, this::recreate));
         button("Добавить вручную", v -> Setup.printerForm(this, prefs, new String[]{"", "", "", ""}, this::recreate));
@@ -974,34 +1002,104 @@ public class SettingsActivity extends Activity {
         }
     }
 
-    // ---------------------------------------------------------------- form builders
+    // ---------------------------------------------------------------- form builders, iOS style
+
+    /** The rounded group that rows go into; a header, a footnote or a new list starts the next one. */
+    private LinearLayout group;
+
+    /** "‹ Назад" in the accent colour and the large title. */
+    private void navBar(String back, String title) {
+        LinearLayout bar = new LinearLayout(this);
+        bar.setGravity(Gravity.CENTER_VERTICAL);
+        bar.setMinimumHeight(px(44));
+        if (back != null) {
+            TextView b = text("‹ " + back, 17, ACCENT);
+            b.setPadding(0, px(8), px(16), px(8));
+            b.setOnClickListener(v -> finish());
+            bar.addView(b);
+        }
+        list.addView(bar, new LinearLayout.LayoutParams(-1, -2));
+        TextView t = text(title, 34, TEXT);
+        t.setTypeface(Ui.font(700));
+        list.addView(t, lpm(0, 12));
+    }
+
+    private LinearLayout openGroup() {
+        if (group == null || group.getParent() != list) {
+            group = new LinearLayout(this);
+            group.setOrientation(LinearLayout.VERTICAL);
+            group.setBackground(round(SURFACE, Ui.R_GROUP));
+            group.setClipToOutline(true);
+            list.addView(group, lpm(0, 0));
+        }
+        return group;
+    }
+
+    private void closeGroup() {
+        group = null;
+    }
+
+    /** A row that brings its own padding; minDp is its minimum height. */
+    private void addRow(View v, int minDp) {
+        LinearLayout g = openGroup();
+        if (g.getChildCount() > 0) {
+            View line = new View(this);
+            line.setBackgroundColor(LINE);
+            LinearLayout.LayoutParams ll = new LinearLayout.LayoutParams(-1, Math.max(1, (int) (dp * 0.6f)));
+            ll.leftMargin = px(16);
+            g.addView(line, ll);
+        }
+        if (minDp > 0) v.setMinimumHeight(px(minDp));
+        g.addView(v, new LinearLayout.LayoutParams(-1, -2));
+    }
+
+    /** Anything else (a field, a row of chips, previews) as a padded row of the current group. */
+    private void add(View v, int topDp, int bottomDp) {
+        FrameLayout f = new FrameLayout(this);
+        f.setPadding(px(16), px(10), px(16), px(10));
+        f.addView(v, new FrameLayout.LayoutParams(-1, -2));
+        addRow(f, 44);
+    }
 
     private void section(String title) {
-        TextView t = text(title, 13, ACCENT);
-        t.setTypeface(Typeface.create("sans-serif-medium", Typeface.NORMAL));
-        t.setLetterSpacing(0.12f);
-        t.setAllCaps(true);
-        add(t, 26, 6);
+        closeGroup();
+        TextView t = text(title.toUpperCase(Locale.getDefault()), 13, DIM);
+        t.setPadding(px(16), 0, px(16), 0);
+        list.addView(t, lpm(title.isEmpty() ? 14 : 26, title.isEmpty() ? 0 : 7));
     }
 
     private void label(String s) {
-        add(text(s, 15, TEXT), 12, 2);
+        section(s);
     }
 
+    /** The grey explanation under a group. */
     private void note(String s) {
+        closeGroup();
         TextView t = text(s, 13, DIM);
         t.setLineSpacing(0, 1.15f);
-        add(t, 4, 6);
+        t.setPadding(px(16), 0, px(16), 0);
+        list.addView(t, lpm(7, 4));
+    }
+
+    private TextView chevron() {
+        TextView c = text("›", 24, DIM);
+        c.setAlpha(0.6f);
+        return c;
     }
 
     private void toggle(String key, String label, boolean def) {
-        Switch s = new Switch(this);
-        s.setText(label);
-        s.setTextColor(TEXT);
-        s.setTextSize(TypedValue.COMPLEX_UNIT_SP, 15);
-        s.setChecked(sp.getBoolean(key, def));
-        s.setOnCheckedChangeListener((b, on) -> sp.edit().putBoolean(key, on).apply());
-        add(s, 8, 8);
+        LinearLayout r = new LinearLayout(this);
+        r.setGravity(Gravity.CENTER_VERTICAL);
+        r.setPadding(px(16), px(8), px(14), px(8));
+        TextView t = text(label, 17, TEXT);
+        r.addView(t, new LinearLayout.LayoutParams(0, -2, 1));
+        Ui.Switch sw = new Ui.Switch(this, th, sp.getBoolean(key, def));
+        sw.setListener(on -> sp.edit().putBoolean(key, on).apply());
+        LinearLayout.LayoutParams sl = new LinearLayout.LayoutParams(-2, -2);
+        sl.leftMargin = px(12);
+        r.addView(sw, sl);
+        r.setOnClickListener(v -> sw.toggle());
+        addRow(r, 48);
     }
 
     private void chips(String key, String def, String[][] options, boolean reload) {
@@ -1034,17 +1132,18 @@ public class SettingsActivity extends Activity {
     }
 
     private TextView chip(String label, boolean selected, View.OnClickListener l) {
-        TextView t = text(label, 14, TEXT);
+        TextView t = text(label, 15, TEXT);
         t.setSingleLine();
-        t.setPadding(px(14), px(8), px(14), px(8));
+        t.setPadding(px(14), px(7), px(14), px(7));
         styleChip(t, selected);
         if (l != null) t.setOnClickListener(l);
         return t;
     }
 
     private void styleChip(TextView t, boolean selected) {
-        t.setTextColor(selected ? 0xFF1E1714 : TEXT);
-        t.setBackground(round(selected ? ACCENT : SURFACE, 18));
+        t.setTextColor(selected ? DashTheme.onColor(ACCENT) : TEXT);
+        t.setTypeface(Ui.font(selected ? 600 : 400));
+        t.setBackground(round(selected ? ACCENT : Ui.fill(th), 100));
     }
 
     private LinearLayout.LayoutParams chipLp() {
@@ -1063,8 +1162,9 @@ public class SettingsActivity extends Activity {
     private EditText intField(String key, String hint) {
         EditText e = new EditText(this);
         e.setHint(hint);
-        e.setHintTextColor(0xFF6B5D52);
+        e.setHintTextColor(DIM);
         e.setTextColor(TEXT);
+        e.setBackground(null);
         e.setInputType(InputType.TYPE_CLASS_NUMBER);
         e.setGravity(Gravity.CENTER);
         if (sp.contains(key)) e.setText(String.valueOf(sp.getInt(key, 0)));
@@ -1081,10 +1181,12 @@ public class SettingsActivity extends Activity {
     private EditText edit(String key, String hint, int type, boolean isInt) {
         EditText e = new EditText(this);
         e.setHint(hint);
-        e.setHintTextColor(0xFF6B5D52);
+        e.setHintTextColor(DIM);
         e.setTextColor(TEXT);
+        e.setBackground(null);
+        e.setPadding(0, 0, 0, 0);
         e.setInputType(type);
-        e.setTextSize(TypedValue.COMPLEX_UNIT_SP, 15);
+        e.setTextSize(TypedValue.COMPLEX_UNIT_SP, 17);
         if (isInt) {
             if (sp.contains(key)) e.setText(String.valueOf(sp.getInt(key, 0)));
         } else {
@@ -1108,23 +1210,21 @@ public class SettingsActivity extends Activity {
         return e;
     }
 
+    /** An action row in the accent colour, as iOS lists have them. */
     private void button(String label, View.OnClickListener l) {
-        Button b = new Button(this);
-        b.setText(label);
-        b.setAllCaps(false);
+        TextView b = text(label, 17, ACCENT);
+        b.setPadding(px(16), px(12), px(16), px(12));
         b.setOnClickListener(l);
-        add(b, 6, 2);
+        addRow(b, 48);
     }
 
-    /** The main action of a section, in the accent colour. */
+    /** The main action of a section: the same row, in semibold. */
     private void primary(String label, View.OnClickListener l) {
-        TextView b = text(label, 15, 0xFF1E1714);
-        b.setTypeface(Typeface.create("sans-serif-medium", Typeface.NORMAL));
-        b.setGravity(Gravity.CENTER);
-        b.setPadding(px(18), px(12), px(18), px(12));
-        b.setBackground(round(ACCENT, 22));
+        TextView b = text(label, 17, ACCENT);
+        b.setTypeface(Ui.font(600));
+        b.setPadding(px(16), px(12), px(16), px(12));
         b.setOnClickListener(l);
-        add(b, 8, 4);
+        addRow(b, 48);
     }
 
     private TextView text(String s, float sp, int color) {
@@ -1140,12 +1240,6 @@ public class SettingsActivity extends Activity {
         g.setColor(color);
         g.setCornerRadius(r * dp);
         return g;
-    }
-
-    private void add(View v, int topDp, int bottomDp) {
-        LinearLayout.LayoutParams lp = new LinearLayout.LayoutParams(-1, -2);
-        lp.setMargins(0, px(topDp), 0, px(bottomDp));
-        list.addView(v, lp);
     }
 
     private LinearLayout.LayoutParams lpm(float top, float bottom) {
