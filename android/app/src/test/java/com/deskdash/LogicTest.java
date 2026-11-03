@@ -54,6 +54,45 @@ public class LogicTest {
         assertEquals("0°", Weather.deg(0.2));
     }
 
+    @Test
+    public void metNoStandsInForOpenMeteo() throws Exception {
+        assertEquals(80, Weather.metCode("lightrainshowers_day"));
+        assertEquals(95, Weather.metCode("heavyrainandthunder"));
+        assertEquals(68, Weather.metCode("sleet"));
+        assertEquals(Weather.SNOW, Weather.group(Weather.metCode("snowshowers_night")));
+        assertEquals(1, Weather.metCode("fair_polartwilight"));
+
+        // Moscow, 3 November: sunrise about 7:38, sunset about 16:48 (UTC+3)
+        java.time.ZoneId msk = java.time.ZoneId.of("Europe/Moscow");
+        long[] sun = Weather.sun(55.75, 37.62, java.time.LocalDate.of(2026, 11, 3));
+        java.time.LocalTime rise = java.time.Instant.ofEpochMilli(sun[0]).atZone(msk).toLocalTime();
+        java.time.LocalTime set = java.time.Instant.ofEpochMilli(sun[1]).atZone(msk).toLocalTime();
+        assertTrue(rise.toString(), rise.isAfter(java.time.LocalTime.of(7, 30)) && rise.isBefore(java.time.LocalTime.of(7, 45)));
+        assertTrue(set.toString(), set.isAfter(java.time.LocalTime.of(16, 40)) && set.isBefore(java.time.LocalTime.of(16, 55)));
+
+        String m = "{\"properties\":{\"timeseries\":["
+                + "{\"time\":\"2026-11-03T12:00:00Z\",\"data\":{\"instant\":{\"details\":{\"air_temperature\":3.0,\"wind_speed\":5.0,\"relative_humidity\":80}},"
+                + "\"next_1_hours\":{\"summary\":{\"symbol_code\":\"cloudy\"},\"details\":{\"precipitation_amount\":0}}}},"
+                + "{\"time\":\"2026-11-03T13:00:00Z\",\"data\":{\"instant\":{\"details\":{\"air_temperature\":4.0}},"
+                + "\"next_1_hours\":{\"summary\":{\"symbol_code\":\"lightrain\"},\"details\":{\"precipitation_amount\":0.4}}}},"
+                + "{\"time\":\"2026-11-04T12:00:00Z\",\"data\":{\"instant\":{\"details\":{\"air_temperature\":-1.0}},"
+                + "\"next_6_hours\":{\"summary\":{\"symbol_code\":\"snow\"},\"details\":{\"precipitation_amount\":2}}}}]}}";
+        long now = java.time.Instant.parse("2026-11-03T12:20:00Z").toEpochMilli();
+        org.json.JSONObject o = Weather.fromMetNo(new org.json.JSONObject(m), 55.75, 37.62, msk, now);
+        org.json.JSONObject cur = o.getJSONObject("current");
+        assertEquals(3.0, cur.getDouble("temperature_2m"), 1e-9);
+        assertTrue(cur.getDouble("apparent_temperature") < 3.0);
+        assertEquals(1, cur.getInt("is_day"));
+        assertEquals(10800, o.getInt("utc_offset_seconds"));
+        assertEquals(2, o.getJSONObject("hourly").getJSONArray("time").length());
+        org.json.JSONObject daily = o.getJSONObject("daily");
+        assertEquals(2, daily.getJSONArray("time").length());
+        assertEquals(61, daily.getJSONArray("weather_code").getInt(0));
+        assertEquals(4.0, daily.getJSONArray("temperature_2m_max").getDouble(0), 1e-9);
+        assertEquals(70, daily.getJSONArray("precipitation_probability_max").getInt(0));
+        assertEquals(73, daily.getJSONArray("weather_code").getInt(1));
+    }
+
     // ---------------------------------------------------------------- smart home readings
 
     private static HomeDevice sensor(String name, String state) {

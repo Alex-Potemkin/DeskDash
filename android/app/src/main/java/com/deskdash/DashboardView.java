@@ -3789,6 +3789,7 @@ public class DashboardView extends FrameLayout {
                     }
                 });
             } catch (Exception e) {
+                android.util.Log.w("DeskDash", "weather", e);
                 if (force) ui.post(() -> Toast.makeText(ctx, "Погода: " + SmartHome.msg(e), Toast.LENGTH_SHORT).show());
             }
         });
@@ -4322,15 +4323,12 @@ public class DashboardView extends FrameLayout {
         boolean found = false;
         for (Object[] pg : pages) found |= pg[0].equals(page);
         if (!found) page = "main";
-        ScrollView rs = new ScrollView(ctx);
-        rs.setVerticalScrollBarEnabled(false);
+        // the sections share the rail's whole height, evenly
         LinearLayout items = vertical();
-        items.setGravity(Gravity.CENTER_HORIZONTAL);
-        rs.addView(items);
         for (Object[] pg : pages) {
             boolean sel = pg[0].equals(page);
             LinearLayout item = vertical();
-            item.setGravity(Gravity.CENTER_HORIZONTAL);
+            item.setGravity(Gravity.CENTER);
             ImageView ic = iconButton((int) pg[1], sel ? DashTheme.onColor(th.accent) : th.dim, 36);
             if (sel) ic.setBackground(rounded(th.accent, 12));
             item.addView(ic, new LinearLayout.LayoutParams(px(46), px(32)));
@@ -4345,12 +4343,25 @@ public class DashboardView extends FrameLayout {
                 prefs.setDockPage(id);
                 build();
             });
-            items.addView(item, margins(-1, -2, 0, 4, 0, 6));
+            items.addView(item, new LinearLayout.LayoutParams(-1, 0, 1));
         }
-        rail.addView(rs, new LinearLayout.LayoutParams(-1, 0, 1));
-        ImageView more = iconButton(R.drawable.ic_more, th.dim, 34);
-        more.setOnClickListener(v -> openMenu());
-        rail.addView(more, new LinearLayout.LayoutParams(px(34), px(34)));
+        // big system fonts or a short screen: when a section has no room for its name, only the icons stay
+        List<TextView> labels = new ArrayList<>();
+        for (int i = 0; i < items.getChildCount(); i++) labels.add((TextView) ((LinearLayout) items.getChildAt(i)).getChildAt(1));
+        items.addOnLayoutChangeListener((v, l, t, r, b, ol, ot, or, ob) -> {
+            if (labels.isEmpty() || labels.get(0).getVisibility() != View.VISIBLE) return;
+            int need = px(38) + labels.get(0).getLineHeight();
+            if (items.getChildAt(0).getHeight() >= need) return;
+            for (TextView lb : labels) lb.setVisibility(View.GONE);
+            items.post(items::requestLayout);
+        });
+        rail.addView(items, margins(-1, 0, 0, 0, 0, 8, 1));
+        // on the desk the bottom bar has ⋮ already; the other pages have no bar
+        if (!"main".equals(page)) {
+            ImageView more = iconButton(R.drawable.ic_more, th.dim, 34);
+            more.setOnClickListener(v -> openMenu());
+            rail.addView(more, new LinearLayout.LayoutParams(px(34), px(34)));
+        }
         content.addView(rail, new LinearLayout.LayoutParams(px(72), -1));
 
         LinearLayout area = new LinearLayout(ctx);

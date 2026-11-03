@@ -28,6 +28,8 @@ final class Net {
             c.setRequestMethod(method);
             c.setConnectTimeout(timeoutMs);
             c.setReadTimeout(timeoutMs);
+            // met.no turns away requests that don't say who is asking
+            c.setRequestProperty("User-Agent", "DeskDash github.com/Alex-Potemkin/DeskDash");
             if (auth != null) c.setRequestProperty("Authorization", auth);
             if (body != null) {
                 byte[] data = body.getBytes(StandardCharsets.UTF_8);
