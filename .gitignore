@@ -7,6 +7,11 @@ local.properties
 *.iml
 .idea/
 
+# release signing: the key and its passwords never go into git
+keystore.properties
+*.jks
+*.keystore
+
 # python
 __pycache__/
 

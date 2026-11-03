@@ -290,6 +290,10 @@ cd android
 JAVA_HOME="C:/Program Files/Java/jdk-17" ./gradlew assembleDebug
 ```
 
+Релиз (`./gradlew assembleRelease`) подписывается своим ключом, если рядом лежит `android/keystore.properties`
+(в git не попадает) со строками `storeFile`, `storePassword`, `keyAlias`, `keyPassword`. Без него релиз
+подписывается отладочным ключом.
+
 ```bash
 cd pc-agent
 python -m pip install pyinstaller pystray pillow
