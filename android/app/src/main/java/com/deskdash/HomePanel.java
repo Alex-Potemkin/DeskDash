@@ -200,6 +200,7 @@ final class HomePanel extends LinearLayout {
                 if (d.kind == HomeDevice.LIGHT) lights++;
             }
             double v = Double.NaN;
+            if (d.outdoor()) continue; // the street isn't "at home"
             if (d.kind == HomeDevice.CLIMATE) v = d.current;
             else if (d.kind == HomeDevice.SENSOR) {
                 Matcher m = DEGREES.matcher(d.state);
@@ -379,7 +380,7 @@ final class HomePanel extends LinearLayout {
     }
 
     /** The colour of a kind of device when it is on: yellow lamps, orange heat, blue blinds… */
-    private static int kindColor(HomeDevice d) {
+    static int kindColor(HomeDevice d) {
         if (d == null) return Ui.ORANGE;
         switch (d.kind) {
             case HomeDevice.LIGHT: return Ui.YELLOW;
@@ -423,7 +424,7 @@ final class HomePanel extends LinearLayout {
         }
     }
 
-    private static int iconFor(HomeDevice d) {
+    static int iconFor(HomeDevice d) {
         if (d == null) return R.drawable.ic_home;
         switch (d.kind) {
             case HomeDevice.LIGHT: return R.drawable.ic_bulb;

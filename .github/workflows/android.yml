@@ -1,0 +1,61 @@
+name: Android
+
+on:
+  push:
+    branches: [main]
+    paths: ["android/**", ".github/workflows/android.yml"]
+    tags: ["v*"]
+  pull_request:
+    paths: ["android/**", ".github/workflows/android.yml"]
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    runs-on: ubuntu-22.04
+    env:
+      # the release key lives in the repository's secrets: RELEASE_KEYSTORE (base64 of the .jks) and RELEASE_PASSWORD
+      HAS_KEY: ${{ secrets.RELEASE_KEYSTORE != '' }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: 17
+
+      - name: Unit tests
+        working-directory: android
+        run: bash gradlew testDebugUnitTest --no-daemon
+
+      - name: Release key
+        if: env.HAS_KEY == 'true'
+        working-directory: android
+        env:
+          KEYSTORE: ${{ secrets.RELEASE_KEYSTORE }}
+          PASSWORD: ${{ secrets.RELEASE_PASSWORD }}
+        run: |
+          echo "$KEYSTORE" | base64 -d > "$RUNNER_TEMP/release.jks"
+          printf 'storeFile=%s\nstorePassword=%s\nkeyAlias=deskdash\nkeyPassword=%s\n' \
+            "$RUNNER_TEMP/release.jks" "$PASSWORD" "$PASSWORD" > keystore.properties
+
+      - name: Build the APK
+        working-directory: android
+        run: |
+          bash gradlew assembleRelease --no-daemon
+          cp app/build/outputs/apk/release/app-release.apk ../DeskDash.apk
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: DeskDash-apk
+          path: DeskDash.apk
+
+      - name: Attach to the release
+        if: startsWith(github.ref, 'refs/tags/v')
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh release view "$GITHUB_REF_NAME" >/dev/null 2>&1 || gh release create "$GITHUB_REF_NAME" --generate-notes
+          gh release upload "$GITHUB_REF_NAME" DeskDash.apk --clobber

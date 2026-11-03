@@ -1,7 +1,9 @@
 """DeskDash Hub: one place for the whole house, meant to run on a Raspberry Pi next to the NAS.
 
 It keeps the Home Assistant and Yandex logins, watches the computers with the DeskDash agent and the Pi
-itself, runs scenes that mix all of them, and serves:
+itself, runs scenes that mix all of them and automations by time, sun, devices and calls (automations.py),
+keeps the phones' saved settings and a nightly backup on the NAS, hands out photos for the dashboard's
+photo frame, and serves:
   * the web app for phones (open http://<pi>:8780 and "Add to home screen"),
   * the same JSON API for the DeskDash dashboard on the desk.
 Standard library only.
@@ -12,7 +14,10 @@ Standard library only.
 """
 import json
 import mimetypes
+import shutil
 import os
+import random
+import re
 import secrets
 import socket
 import sys
@@ -22,11 +27,12 @@ import uuid
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from urllib.parse import parse_qs, unquote, urlparse
 
+import automations
 import machines
 import providers
 from providers import SCENE, SWITCH, ProviderError
 
-VERSION = "1.0"
+VERSION = "1.1"
 HERE = os.path.dirname(os.path.abspath(__file__))
 WEB_DIR = os.path.join(HERE, "web")
 if os.environ.get("DESKDASH_HUB_DATA"):
@@ -59,7 +65,7 @@ def config():
             with open(CONFIG_PATH, encoding="utf-8") as f:
                 _cfg.update(json.load(f))
         defaults = {"name": "Дом", "port": 8780, "tokens": [], "ha": {}, "yandex": {}, "pcs": [],
-                    "nas": {"paths": ["/"]}, "scenes": []}
+                    "nas": {"paths": ["/"]}, "scenes": [], "rules": [], "location": {}, "photos": {}}
         for k, v in defaults.items():
             _cfg.setdefault(k, v)
         if not _cfg["tokens"]:
@@ -219,9 +225,14 @@ class Hub:
             system, errors, version = dict(self.system), dict(self.errors), self.version
         devices += virtual_devices(cfg, pcs)
         return {"version": version, "name": cfg["name"], "hub": VERSION, "devices": devices, "pcs": pcs,
-                "system": system, "scenes": [public_scene(s) for s in cfg["scenes"]],
+                "system": system, "scenes": [public_scene(s) for s in cfg["scenes"]], "rules": cfg.get("rules") or [],
                 "errors": {k: v for k, v in errors.items() if v},
                 "configured": {"ha": self.ha is not None, "ya": self.ya is not None}}
+
+    def calls_on(self):
+        """A call is on at one of the computers."""
+        with self.lock:
+            return any(p.get("online") and p.get("calls") for p in self.pcs.values())
 
     def find(self, did):
         with self.lock:
@@ -353,11 +364,12 @@ def run_scene(sid):
     if s is None:
         raise ProviderError("нет такого сценария")
     log(f"сценарий «{s.get('label', sid)}»")
-    threading.Thread(target=_scene_steps, args=(s,), daemon=True).start()
+    threading.Thread(target=run_steps, args=(s.get("steps") or [], s.get("label", sid)), daemon=True).start()
 
 
-def _scene_steps(s):
-    for st in s.get("steps") or []:
+def run_steps(steps, label=""):
+    """Steps of a scene or an automation, one after another; a failed step is logged and skipped."""
+    for st in steps:
         try:
             if "wait" in st:
                 time.sleep(min(float(st["wait"]), 600_000) / 1000)
@@ -368,7 +380,53 @@ def _scene_steps(s):
             elif st.get("wake"):
                 pc_action("pc:" + st["wake"], "on")
         except (ProviderError, ValueError, TypeError) as e:
-            log(f"сценарий «{s.get('label')}»: шаг {st}: {e}")
+            log(f"«{label}»: шаг {st}: {e}")
+
+
+ENGINE = automations.Engine(lambda: config(), lambda did, a, v=None: HUB.act(did, a, v), run_steps,
+                            lambda: HUB.snapshot()["devices"], lambda: HUB.calls_on(), log, DATA_DIR)
+
+
+# ---------------------------------------------------------------- saved phone settings and photos
+
+PROFILES_DIR = os.path.join(DATA_DIR, "profiles")
+PHOTO_EXT = (".jpg", ".jpeg", ".png", ".webp")
+
+
+def profile_path(name):
+    safe = re.sub(r"[^\w\-]", "_", str(name), flags=re.UNICODE)[:40] or "phone"
+    return os.path.join(PROFILES_DIR, safe + ".json")
+
+
+def profiles():
+    if not os.path.isdir(PROFILES_DIR):
+        return []
+    out = []
+    for f in sorted(os.listdir(PROFILES_DIR)):
+        if f.endswith(".json"):
+            st = os.stat(os.path.join(PROFILES_DIR, f))
+            out.append({"name": f[:-5], "at": int(st.st_mtime), "size": st.st_size})
+    return out
+
+
+def photos_dir():
+    d = (config().get("photos") or {}).get("path") or ""
+    return d if d and os.path.isdir(d) else None
+
+
+def photo_list():
+    base = photos_dir()
+    if not base:
+        return []
+    out = []
+    for root, dirs, files in os.walk(base):
+        dirs[:] = [d for d in dirs if not d.startswith(".")]
+        for f in files:
+            if f.lower().endswith(PHOTO_EXT) and not f.startswith("."):
+                out.append(os.path.relpath(os.path.join(root, f), base).replace(os.sep, "/"))
+                if len(out) >= 3000:
+                    return out
+    return out
 
 
 # ---------------------------------------------------------------- http
@@ -484,12 +542,39 @@ class Handler(BaseHTTPRequestHandler):
             return self._send(200, public_config())
         if path == "/api/discover":
             return self._send(200, {"ok": True, "agents": machines.discover_agents()})
+        if path == "/api/profiles":
+            return self._send(200, {"ok": True, "profiles": profiles()})
+        if path.startswith("/api/profiles/"):
+            f = profile_path(unquote(path[len("/api/profiles/"):]))
+            if not os.path.isfile(f):
+                return self._send(404, {"ok": False, "error": "нет такой копии"})
+            with open(f, encoding="utf-8") as fh:
+                return self._send(200, {"ok": True, "backup": json.load(fh)})
+        if path == "/api/photos":
+            lst = photo_list()
+            random.shuffle(lst)
+            return self._send(200, {"ok": True, "photos": lst[:500]})
+        if path == "/api/photo":
+            return self._photo(parse_qs(urlparse(self.path).query).get("f", [""])[0])
         self._send(404, {"ok": False, "error": "not found"})
+
+    def _photo(self, rel):
+        base = photos_dir()
+        full = os.path.realpath(os.path.join(base or "", rel)) if base else ""
+        if not base or not full.startswith(os.path.realpath(base) + os.sep) or not os.path.isfile(full):
+            return self._send(404, {"ok": False, "error": "нет такого фото"})
+        self.send_response(200)
+        self.send_header("Content-Type", mimetypes.guess_type(full)[0] or "image/jpeg")
+        self.send_header("Content-Length", str(os.path.getsize(full)))
+        self.send_header("Cache-Control", "max-age=86400")
+        self.end_headers()
+        with open(full, "rb") as fh:
+            shutil.copyfileobj(fh, self.wfile, 65536)
 
     def do_POST(self):
         path = urlparse(self.path).path
         body = self._body()  # read first: with keep-alive an unread body would spoil the next request
-        u = self._user(admin=path.startswith(("/api/config", "/api/tokens", "/api/import")))
+        u = self._user(admin=path.startswith(("/api/config", "/api/tokens", "/api/import", "/api/backup")))
         if u is None:
             return
         try:
@@ -500,6 +585,29 @@ class Handler(BaseHTTPRequestHandler):
             if path.startswith("/api/scene/"):
                 run_scene(unquote(path[len("/api/scene/"):]))
                 return self._send(200, {"ok": True})
+            if path.startswith("/api/rule/"):
+                ENGINE.run_now(unquote(path[len("/api/rule/"):]))
+                return self._send(200, {"ok": True})
+            if path.startswith("/api/profiles/"):
+                name = unquote(path[len("/api/profiles/"):])
+                if body.get("app") != "deskdash":
+                    raise ValueError("это не резервная копия DeskDash")
+                os.makedirs(PROFILES_DIR, exist_ok=True)
+                tmp = profile_path(name) + ".tmp"
+                with open(tmp, "w", encoding="utf-8") as fh:
+                    json.dump(body, fh, ensure_ascii=False)
+                os.replace(tmp, profile_path(name))
+                try:
+                    os.chmod(profile_path(name), 0o600)  # logins of the smart home are in it
+                except OSError:
+                    pass
+                log(f"настройки телефона «{name}» сохранены")
+                return self._send(200, {"ok": True})
+            if path == "/api/backup":
+                try:
+                    return self._send(200, {"ok": True, "path": ENGINE.backup_now()})
+                except OSError as e:
+                    raise ProviderError(str(e))
             if path == "/api/config":
                 apply_config(body)
                 return self._send(200, {"ok": True, **public_config()})
@@ -531,7 +639,8 @@ def public_config():
             "ha": {"url": ha.get("url", ""), "hasToken": bool(ha.get("token")), "hasLogin": bool(ha.get("refresh"))},
             "yandex": {"hasToken": bool(ya.get("token")), "clientId": ya.get("clientId", "")},
             "pcs": [{k: p.get(k, "") for k in ("id", "name", "host", "port", "token", "mac")} for p in c["pcs"]],
-            "nas": c["nas"], "scenes": c["scenes"], "tokens": c["tokens"]}
+            "nas": c["nas"], "scenes": c["scenes"], "tokens": c["tokens"], "rules": c.get("rules") or [],
+            "location": c.get("location") or {}, "photos": c.get("photos") or {}, "backup_dir": c.get("backup_dir", "")}
 
 
 def apply_config(b):
@@ -574,6 +683,23 @@ def apply_config(b):
                 scenes.append({"id": str(s.get("id") or uuid.uuid4().hex[:6]), "label": str(s["label"]).strip(),
                                "icon": str(s.get("icon") or "star"), "steps": list(s.get("steps") or [])})
             c["scenes"] = scenes
+        if "rules" in b:
+            rules = []
+            for r in b["rules"]:
+                if not isinstance(r, dict) or not r.get("when"):
+                    continue
+                rules.append({"id": str(r.get("id") or uuid.uuid4().hex[:6]), "label": str(r.get("label") or "Автоматизация"),
+                              "on": bool(r.get("on", True)), "when": dict(r["when"]),
+                              "days": [int(d) for d in r.get("days") or [] if 1 <= int(d) <= 7],
+                              "do": list(r.get("do") or []), "dawn": dict(r.get("dawn") or {})})
+            c["rules"] = rules
+        if "location" in b:
+            loc = b["location"] or {}
+            c["location"] = {"lat": float(loc["lat"]), "lon": float(loc["lon"])} if "lat" in loc else {}
+        if "photos" in b:
+            c["photos"] = {"path": str((b["photos"] or {}).get("path", "")).strip()}
+        if "backup_dir" in b:
+            c["backup_dir"] = str(b["backup_dir"]).strip()
     update_config(fn)
 
 
@@ -661,6 +787,7 @@ def main():
     HUB.reconfigure()
     threading.Thread(target=HUB.loop, daemon=True).start()
     threading.Thread(target=discovery, daemon=True).start()
+    ENGINE.start()
     server = ThreadingHTTPServer(("0.0.0.0", int(cfg["port"])), Handler)
     server.daemon_threads = True
     admin = next(t for t in cfg["tokens"] if t.get("admin"))

@@ -508,6 +508,40 @@ async function renderSettings(v) {
   // scenes
   v.append(h("h2", {}, "Сценарии"), scenesEditor(c, save));
 
+  // automations
+  v.append(h("h2", {}, "Автоматизации"), rulesEditor(c, save));
+
+  // place for sunset and sunrise
+  const loc = { lat: c.location?.lat ?? "", lon: c.location?.lon ?? "" };
+  v.append(h("h2", {}, "Место"), h("div", { class: "card" },
+    field("Широта", loc.lat, x => (loc.lat = x), { inputmode: "decimal", placeholder: "55.75" }),
+    field("Долгота", loc.lon, x => (loc.lon = x), { inputmode: "decimal", placeholder: "37.62" }),
+    h("p", { class: "hint" }, "Для автоматизаций «на закате» и «на рассвете». Дашборд передаёт место сам, когда переносит автоматизации на хаб."),
+    h("div", { class: "btns" }, h("button", { class: "primary", onclick: () => save(loc.lat === "" ? { location: {} } : { location: { lat: +loc.lat, lon: +loc.lon } }) }, "Сохранить"))));
+
+  // photos for the dashboard's photo frame
+  const ph = { path: c.photos?.path || "" };
+  v.append(h("h2", {}, "Фото"), h("div", { class: "card" },
+    field("Папка с фотографиями", ph.path, x => (ph.path = x), { placeholder: "/mnt/nas/Фото" }),
+    h("p", { class: "hint" }, "Виджет «Фото» и StandBy на дашборде показывают их по очереди, вложенные папки тоже."),
+    h("div", { class: "btns" }, h("button", { class: "primary", onclick: () => save({ photos: ph }) }, "Сохранить"))));
+
+  // backups
+  let bdir = c.backup_dir || "";
+  const saved = h("div", { class: "hint" }, "…");
+  api("/api/profiles").then(r => {
+    saved.textContent = r.profiles.length ? "Настройки телефонов на хабе: " + r.profiles.map(p => `${p.name} (${new Date(p.at * 1000).toLocaleString("ru")})`).join(", ")
+      : "Телефоны ещё не сохраняли настройки: дашборд делает это сам раз в день.";
+  }, () => (saved.textContent = ""));
+  v.append(h("h2", {}, "Резервная копия"), h("div", { class: "card" },
+    field("Папка для копий (пусто — на первом диске NAS)", bdir, x => (bdir = x), { placeholder: "/mnt/nas/deskdash-backup" }),
+    h("p", { class: "hint" }, "Каждую ночь в 3:30 хаб копирует свои настройки и настройки телефонов, хранит две недели."), saved,
+    h("div", { class: "btns" },
+      h("button", { class: "ghost", onclick: () => save({ backup_dir: bdir }) }, "Сохранить"),
+      h("button", { class: "primary", onclick: async () => {
+        try { const r = await api("/api/backup", {}); toast("Копия: " + r.path); } catch (e) { toast(e.message); }
+      } }, "Сделать копию сейчас"))));
+
   // access
   const tokBox = h("div", { class: "card" });
   for (const t of c.tokens) {
@@ -610,6 +644,66 @@ function scenesEditor(c, save) {
       h("button", { class: "ghost", onclick: () => { c.scenes.push({ label: "Новый сценарий", icon: "star", steps: [] }); draw(); } }, "+ Сценарий"),
       h("button", { class: "primary", onclick: () => save({ scenes: c.scenes }) }, "Сохранить сценарии")),
       h("p", { class: "hint" }, "Пример «Кино»: свет в гостиной 20%, шторы закрыть, ПК: макрос «Пауза» → Spotify, пауза 1 с, телевизор включить. Сценарии хаба видны и на дашборде как плитки."));
+  };
+  draw();
+  return box;
+}
+
+// Automations: {id, label, on, when: {at} | {sun, offset} | {device, to} | {call}, days, do: [{device, action}], dawn}
+function rulesEditor(c, save) {
+  const box = h("div");
+  const devices = state?.devices || [];
+  c.rules = c.rules || [];
+  const days = ["Пн", "Вт", "Ср", "Чт", "Пт", "Сб", "Вс"];
+  const sel = (opts, value, set) => h("select", { onchange: e => set(e.target.value) },
+    opts.map(([v, l]) => h("option", { value: v, selected: String(v) === String(value) }, l)));
+  const kind = w => "at" in w ? "at" : "sun" in w ? "sun" : "device" in w ? "device" : "call";
+  const draw = () => {
+    box.innerHTML = "";
+    c.rules.forEach((r, ri) => {
+      r.when = r.when || { at: "07:00" };
+      r.do = r.do || [];
+      r.days = r.days || [];
+      const card = h("div", { class: "card" });
+      card.append(h("div", { class: "row" }, h("input", { value: r.label, oninput: e => (r.label = e.target.value) }),
+        h("label", { class: "switch" }, h("input", { type: "checkbox", checked: r.on !== false, onchange: e => (r.on = e.target.checked) }), h("span"))));
+      const k = kind(r.when);
+      card.append(h("label", { class: "f" }, "Когда"), sel([["at", "В заданное время"], ["sun", "Закат или рассвет"], ["device", "Устройство включилось или выключилось"],
+        ["call", "Созвон на ПК"]], k, x => { r.when = x === "at" ? { at: "07:00" } : x === "sun" ? { sun: "sunset", offset: 0 } : x === "device" ? { device: devices[0]?.id || "", to: "on" } : { call: "start" }; draw(); }));
+      if (k === "at") card.append(h("input", { type: "time", value: r.when.at, oninput: e => (r.when.at = e.target.value) }));
+      if (k === "sun") card.append(h("div", { class: "step" }, sel([["sunset", "Закат"], ["sunrise", "Рассвет"]], r.when.sun, x => (r.when.sun = x)),
+        h("input", { type: "number", value: r.when.offset || 0, oninput: e => (r.when.offset = +e.target.value), title: "сдвиг, минут" })));
+      if (k === "device") card.append(sel(devices.map(d => [d.id, d.name + (d.room ? " · " + d.room : "")]), r.when.device, x => (r.when.device = x)),
+        sel([["on", "включилось / открылось"], ["off", "выключилось / закрылось"]], r.when.to, x => (r.when.to = x)));
+      if (k === "call") card.append(sel([["start", "начался"], ["end", "закончился"]], r.when.call, x => (r.when.call = x)));
+      if (k === "at" || k === "sun") {
+        card.append(h("div", { class: "chips" }, days.map((d, i) => h("button", {
+          class: "chip" + (!r.days.length || r.days.includes(i + 1) ? " sel" : ""),
+          onclick: () => { if (!r.days.length) r.days = [1, 2, 3, 4, 5, 6, 7]; r.days = r.days.includes(i + 1) ? r.days.filter(x => x !== i + 1) : [...r.days, i + 1].sort(); if (r.days.length === 7) r.days = []; draw(); },
+        }, d))));
+      }
+      card.append(h("label", { class: "f" }, "Что сделать"));
+      r.do.forEach((st, i) => card.append(h("div", { class: "step" }, h("div", { style: "display:grid;gap:6px" },
+        sel(devices.map(d => [d.id, d.name + (d.room ? " · " + d.room : "")]), st.device, x => (st.device = x)),
+        sel([["on", "включить"], ["off", "выключить"], ["run", "запустить"], ["toggle", "переключить"]], st.action, x => (st.action = x))),
+        h("button", { class: "x", onclick: () => { r.do.splice(i, 1); draw(); } }, "✕"))));
+      const lamps = devices.filter(d => d.dimmable);
+      card.append(h("div", { class: "btns" },
+        h("button", { class: "ghost", onclick: () => { r.do.push({ device: devices[0]?.id || "", action: "on" }); draw(); } }, "+ Действие"),
+        lamps.length && (k === "at" || k === "sun") ? h("button", { class: "ghost", onclick: () => { r.dawn = r.dawn?.device ? {} : { device: lamps[0].id, minutes: 20 }; draw(); } },
+          r.dawn?.device ? "Без рассвета" : "+ Рассвет лампой") : null));
+      if (r.dawn?.device) card.append(h("div", { class: "step" }, sel(lamps.map(d => [d.id, d.name]), r.dawn.device, x => (r.dawn.device = x)),
+        h("input", { type: "number", value: r.dawn.minutes || 20, oninput: e => (r.dawn.minutes = +e.target.value), title: "минут" })),
+        h("p", { class: "hint" }, "Лампа разгорается от 1 % до полной за столько минут и доходит до неё к заданному времени."));
+      card.append(h("div", { class: "btns" },
+        r.id ? h("button", { class: "ghost", onclick: async () => { await save({ rules: c.rules }); api("/api/rule/" + encodeURIComponent(r.id), {}).then(() => toast(`«${r.label}» выполнено`), e => toast(e.message)); } }, "▶ Проверить") : null,
+        h("button", { class: "danger", onclick: () => { c.rules.splice(ri, 1); draw(); } }, "Удалить")));
+      box.append(card);
+    });
+    box.append(h("div", { class: "btns" },
+      h("button", { class: "ghost", onclick: () => { c.rules.push({ label: "Новая автоматизация", on: true, when: { at: "07:00" }, days: [], do: [] }); draw(); } }, "+ Автоматизация"),
+      h("button", { class: "primary", onclick: () => save({ rules: c.rules }) }, "Сохранить автоматизации")),
+      h("p", { class: "hint" }, "Работают на хабе, даже когда все экраны выключены. Примеры: в 23:00 выключить свет; на закате закрыть шторы; открылась дверь — включить свет в прихожей; начался созвон — лампа у стола."));
   };
   draw();
   return box;

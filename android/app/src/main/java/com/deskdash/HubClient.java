@@ -21,11 +21,12 @@ final class HubClient {
     static final int DISCOVERY_PORT = 8767;
     private static final int TIMEOUT = 5000;
 
-    private final String base, auth;
+    private final String base, auth, token;
 
     HubClient(Prefs p) {
         base = p.hubUrl();
-        auth = "Bearer " + p.hubToken();
+        token = p.hubToken();
+        auth = "Bearer " + token;
     }
 
     static boolean configured(Prefs p) {
@@ -55,6 +56,62 @@ final class HubClient {
         JSONObject body = new JSONObject().put("action", action);
         if (value != null) body.put("value", value);
         JSONObject r = new JSONObject(request("POST", "/api/device/" + HomeAssistant.enc(d.id).replace("+", "%20"), body));
+        if (!r.optBoolean("ok")) throw new IOException(r.optString("error", "хаб вернул ошибку"));
+    }
+
+    // ---------------------------------------------------------------- saved settings, photos, automations
+
+    /** Keeps a settings file (Backup) on the hub under a name, e.g. the phone's. */
+    void saveSettings(String name, String backupJson) throws IOException, JSONException {
+        JSONObject r = new JSONObject(request("POST", "/api/profiles/" + HomeAssistant.enc(name).replace("+", "%20"),
+                new JSONObject(backupJson)));
+        if (!r.optBoolean("ok")) throw new IOException(r.optString("error", "хаб вернул ошибку"));
+    }
+
+    /** {name, saved at (ms)} of the settings files kept on the hub. */
+    List<String[]> savedSettings() throws IOException, JSONException {
+        JSONArray a = new JSONObject(request("GET", "/api/profiles", null)).optJSONArray("profiles");
+        List<String[]> out = new ArrayList<>();
+        for (int i = 0; a != null && i < a.length(); i++) {
+            JSONObject o = a.getJSONObject(i);
+            out.add(new String[]{o.optString("name"), String.valueOf(o.optLong("at") * 1000)});
+        }
+        return out;
+    }
+
+    String loadSettings(String name) throws IOException, JSONException {
+        return new JSONObject(request("GET", "/api/profiles/" + HomeAssistant.enc(name).replace("+", "%20"), null))
+                .getJSONObject("backup").toString();
+    }
+
+    /** Photos of the folder set on the hub, shuffled. */
+    List<String> photos() throws IOException, JSONException {
+        JSONArray a = new JSONObject(request("GET", "/api/photos", null)).optJSONArray("photos");
+        List<String> out = new ArrayList<>();
+        for (int i = 0; a != null && i < a.length(); i++) out.add(a.getString(i));
+        return out;
+    }
+
+    String photoUrl(String rel) {
+        return base + "/api/photo?f=" + HomeAssistant.enc(rel).replace("+", "%20") + "&token=" + HomeAssistant.enc(token);
+    }
+
+    /**
+     * Puts the phone's automations on the hub (rules with ids "phone-…" replace the earlier ones, the hub's own
+     * stay) and the place for sunset rules. Needs an admin token.
+     */
+    void pushRules(JSONArray rules, double lat, double lon) throws IOException, JSONException {
+        JSONObject cfg = new JSONObject(request("GET", "/api/config", null));
+        JSONArray all = new JSONArray();
+        JSONArray old = cfg.optJSONArray("rules");
+        for (int i = 0; old != null && i < old.length(); i++) {
+            JSONObject r = old.getJSONObject(i);
+            if (!r.optString("id").startsWith("phone-")) all.put(r);
+        }
+        for (int i = 0; i < rules.length(); i++) all.put(rules.get(i));
+        JSONObject b = new JSONObject().put("rules", all);
+        if (!Double.isNaN(lat)) b.put("location", new JSONObject().put("lat", lat).put("lon", lon));
+        JSONObject r = new JSONObject(request("POST", "/api/config", b));
         if (!r.optBoolean("ok")) throw new IOException(r.optString("error", "хаб вернул ошибку"));
     }
 

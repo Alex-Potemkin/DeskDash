@@ -20,7 +20,8 @@ import java.util.List;
 final class Desks {
     static final String[][] TYPES = {
             {"clock", "Часы"}, {"calendar", "Календарь"}, {"music", "Музыка"},
-            {"pc", "Компьютер"}, {"home", "Умный дом"}, {"calls", "Созвоны"}, {"stats", "День"}, {"weather", "Погода"},
+            {"pc", "Компьютер"}, {"home", "Умный дом"}, {"calls", "Созвоны"}, {"stats", "День"}, {"weather", "Погода"}, {"photos", "Фото"},
+            {"messages", "Сообщения"}, {"timers", "Таймеры"}, {"energy", "Энергия"},
     };
 
     private Desks() {}

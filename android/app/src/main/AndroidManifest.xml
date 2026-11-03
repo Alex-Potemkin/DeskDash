@@ -5,6 +5,18 @@
     <uses-permission android:name="android.permission.INTERNET" />
     <uses-permission android:name="android.permission.ACCESS_NETWORK_STATE" />
     <uses-permission android:name="android.permission.MODIFY_AUDIO_SETTINGS" />
+    <uses-permission android:name="android.permission.ACCESS_NOTIFICATION_POLICY" />
+    <uses-permission android:name="android.permission.RECORD_AUDIO" />
+
+    <!-- speech recognition and the voice for answers live in other apps (Android 11+ hides them otherwise) -->
+    <queries>
+        <intent>
+            <action android:name="android.speech.RecognitionService" />
+        </intent>
+        <intent>
+            <action android:name="android.intent.action.TTS_SERVICE" />
+        </intent>
+    </queries>
     <uses-permission android:name="android.permission.CHANGE_WIFI_MULTICAST_STATE" />
 
     <application
@@ -36,7 +48,7 @@
             android:name=".DeskEditorActivity"
             android:exported="false"
             android:label="Столы и блоки"
-            android:theme="@style/Settings" />
+            android:theme="@style/Ios" />
 
         <activity
             android:name=".WelcomeActivity"

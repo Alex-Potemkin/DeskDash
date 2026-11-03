@@ -239,11 +239,30 @@ public class DashboardView extends FrameLayout {
     private long lastTouch = SystemClock.elapsedRealtime();
     private AodClock aodClock;
     private LinearLayout aodInfo;
+    private boolean near;
+    private long nearAt;
+    private Updates.Release update;
+    private boolean updateHidden;
+
+    // modes (like Focus): the active one, and what the schedule / a meeting asked for last time
+    private String autoWanted = null;
+
+    // editing the desk right on the screen: widgets wobble and get buttons, as on an iPhone
+    private boolean editing;
+
+    // messages, timers, voice
+    private final List<MessagesPanel> messagePanels = new ArrayList<>();
+    private final List<Timers.Panel> timerPanels = new ArrayList<>();
+    private final List<EnergyPanel> energyPanels = new ArrayList<>();
+    private final Voice voice = new Voice();
+    private android.speech.tts.TextToSpeech tts;
+    private boolean ttsReady;
+    private Ringtone ringing;
 
     // Spotify announcing itself without any permission
     private final SpotifyBroadcast spotify = new SpotifyBroadcast();
     private String sensorSig = "";
-    private static final java.util.regex.Pattern OUTSIDE = java.util.regex.Pattern.compile("улиц|снаруж|балкон|двор|outdoor|outside|street|погод");
+
     private String nightText = "";
 
     // night by the room light
@@ -331,6 +350,15 @@ public class DashboardView extends FrameLayout {
         ui.post(homePoll);
         ui.post(weatherPoll);
         startLightSensor();
+        io.execute(this::saveToHub);
+        io.execute(() -> {
+            try {
+                Updates.Release r = Updates.check(ctx, false);
+                if (r != null) ui.post(() -> update = r);
+            } catch (Exception ignored) {
+                // offline or no release yet: next time
+            }
+        });
         reloadCalendar();
         if (CalendarRepo.hasPermission(ctx)) {
             try {
@@ -355,6 +383,7 @@ public class DashboardView extends FrameLayout {
         Bambu.stopAll();
         music.stop();
         spotify.stop();
+        watchProximity(false);
         try {
             ctx.getContentResolver().unregisterContentObserver(calObserver);
         } catch (RuntimeException ignored) {
@@ -364,6 +393,8 @@ public class DashboardView extends FrameLayout {
 
     public void shutdown() {
         stop();
+        voice.stop();
+        if (tts != null) tts.shutdown();
         io.shutdownNow();
     }
 
@@ -389,7 +420,8 @@ public class DashboardView extends FrameLayout {
         hasBar = false;
         bigClock = false;
 
-        look = prefs.uiStyle();
+        Modes.Mode mode = activeMode();
+        look = mode != null && !mode.look.isEmpty() ? mode.look : prefs.uiStyle();
         boolean nightClock = nightActive && "clock".equals(prefs.nightLook());
         if (peeking) {
             if ("standby".equals(look)) look = "bento";
@@ -435,8 +467,11 @@ public class DashboardView extends FrameLayout {
         level = new LevelView(ctx);
         level.setAlpha(0f);
         addView(level, new LayoutParams(px(52), px(200), Gravity.CENTER_VERTICAL | Gravity.END));
-        if (deskSwipe && !"dock".equals(look)) buildBar(di, !used.contains("calendar") && !used.contains("clock"));
-        else if (deskSwipe) buildBar(di, false);
+        if (!editing || !"bento".equals(look)) {
+            editing = false;
+            if (deskSwipe && !"dock".equals(look)) buildBar(di, !used.contains("calendar") && !used.contains("clock"));
+            else if (deskSwipe) buildBar(di, false);
+        }
 
         applyPadding();
         applyNightWindow();
@@ -493,14 +528,163 @@ public class DashboardView extends FrameLayout {
                 int h = b.optInt("h", Desks.defaultHeight(t));
                 if (h <= 0 && Desks.needsHeight(t)) h = 1;
                 // music and weather draw their own backgrounds (the cover, the sky)
-                if (bento && !"music".equals(t) && !"weather".equals(t)) v = card(v, card, h > 0);
+                if (bento && !"music".equals(t) && !"weather".equals(t) && !"photos".equals(t)) v = card(v, card, h > 0);
+                if (editing) v = editable(v, i, j, ncols, blocks.length(), t, h);
                 LinearLayout.LayoutParams lp = h > 0 ? new LinearLayout.LayoutParams(-1, 0, h) : new LinearLayout.LayoutParams(-1, -2);
                 if (colView.getChildCount() > 0) lp.topMargin = px(14);
                 colView.addView(v, lp);
             }
+            if (editing) {
+                int ci = i;
+                LinearLayout row = new LinearLayout(ctx);
+                row.addView(Ui.pill(ctx, "+ Виджет", Ui.fill(th), th.accent, v -> addWidget(ci)), new LinearLayout.LayoutParams(0, -2, 1));
+                // "Готово" closes the row of the last column, where the bar usually is
+                if (i == cols.length() - 1) {
+                    TextView done = Ui.pill(ctx, "Готово", th.accent, DashTheme.onColor(th.accent), v -> {
+                        editing = false;
+                        build();
+                    });
+                    row.addView(done, margins(-2, -2, 10, 0, 0, 0));
+                }
+                colView.addView(row, margins(-1, -2, 0, 14, 0, 0));
+            }
             int w = Math.max(1, col.optInt("w", 50));
             into.addView(colView, portrait ? new LinearLayout.LayoutParams(-1, 0, w) : new LinearLayout.LayoutParams(0, -1, w));
         }
+    }
+
+    /**
+     * A widget while the desk is being edited: it wobbles, its content doesn't react, and a row of round
+     * buttons moves it up, down or to the next column, changes its height or removes it.
+     */
+    private View editable(View v, int col, int row, int ncols, int nrows, String type, int h) {
+        FrameLayout f = new FrameLayout(ctx);
+        v.setAlpha(0.55f);
+        f.addView(v, new FrameLayout.LayoutParams(-1, -1));
+        View shield = new View(ctx);
+        shield.setClickable(true);
+        f.addView(shield, new FrameLayout.LayoutParams(-1, -1));
+        LinearLayout btns = new LinearLayout(ctx);
+        btns.setGravity(Gravity.CENTER);
+        btns.setPadding(px(6), px(6), px(6), px(6));
+        btns.setBackground(rounded(th.light ? 0xE6FFFFFF : 0xE62C2C2E, 100));
+        btns.setElevation(6 * dp);
+        if (row > 0) btns.addView(editButton("↑", th.text, () -> editDesk(col, row, "up")));
+        if (row < nrows - 1) btns.addView(editButton("↓", th.text, () -> editDesk(col, row, "down")));
+        if (col > 0) btns.addView(editButton("←", th.text, () -> editDesk(col, row, "left")));
+        if (col < ncols - 1) btns.addView(editButton("→", th.text, () -> editDesk(col, row, "right")));
+        btns.addView(editButton(h <= 0 ? "авто" : "×" + h, th.accent, () -> editDesk(col, row, "size")));
+        btns.addView(editButton("✕", Ui.RED, () -> editDesk(col, row, "remove")));
+        FrameLayout.LayoutParams bl = new FrameLayout.LayoutParams(-2, -2, Gravity.TOP | Gravity.END);
+        bl.setMargins(0, px(8), px(8), 0);
+        f.addView(btns, bl);
+        TextView name = text(th.dim, 12);
+        name.setText(Desks.typeName(type));
+        name.setTypeface(Ui.font(600));
+        FrameLayout.LayoutParams nl = new FrameLayout.LayoutParams(-2, -2, Gravity.BOTTOM | Gravity.CENTER_HORIZONTAL);
+        nl.bottomMargin = px(6);
+        f.addView(name, nl);
+        // the wobble
+        android.animation.ObjectAnimator a = android.animation.ObjectAnimator.ofFloat(f, "rotation", -0.6f, 0.6f);
+        a.setDuration(130 + rnd.nextInt(40));
+        a.setRepeatCount(android.animation.ValueAnimator.INFINITE);
+        a.setRepeatMode(android.animation.ValueAnimator.REVERSE);
+        a.setStartDelay(rnd.nextInt(120));
+        a.start();
+        return f;
+    }
+
+    private TextView editButton(String label, int color, Runnable r) {
+        TextView b = text(color, 15);
+        b.setTypeface(Ui.font(700));
+        b.setText(label);
+        b.setGravity(Gravity.CENTER);
+        b.setMinWidth(px(38));
+        b.setPadding(px(8), px(6), px(8), px(6));
+        b.setOnClickListener(v -> {
+            performHapticFeedback(HapticFeedbackConstants.VIRTUAL_KEY);
+            r.run();
+        });
+        return b;
+    }
+
+    /** One edit of the current desk ("up", "down", "left", "right", "size", "remove"), saved at once. */
+    private void editDesk(int col, int row, String what) {
+        try {
+            JSONArray desks = Desks.load(prefs);
+            JSONObject desk = desks.getJSONObject(curDesk);
+            JSONArray cols = desk.getJSONArray("cols");
+            JSONArray blocks = cols.getJSONObject(col).getJSONArray("blocks");
+            List<Object> l = Desks.toList(blocks);
+            JSONObject b = blocks.getJSONObject(row);
+            switch (what) {
+                case "up":
+                case "down": {
+                    int to = row + ("up".equals(what) ? -1 : 1);
+                    l.set(row, l.get(to));
+                    l.set(to, b);
+                    break;
+                }
+                case "left":
+                case "right": {
+                    l.remove(row);
+                    JSONObject other = cols.getJSONObject(col + ("left".equals(what) ? -1 : 1));
+                    other.getJSONArray("blocks").put(b);
+                    break;
+                }
+                case "size": {
+                    String t = b.optString("t");
+                    int h = b.optInt("h", Desks.defaultHeight(t));
+                    h = (h + 1) % 4;
+                    if (h == 0 && Desks.needsHeight(t)) h = 1;
+                    b.put("h", h);
+                    break;
+                }
+                default:
+                    l.remove(row);
+                    break;
+            }
+            cols.getJSONObject(col).put("blocks", Desks.fromList(l));
+            Desks.save(prefs, desks);
+        } catch (org.json.JSONException e) {
+            Toast.makeText(ctx, "Не вышло: " + e.getMessage(), Toast.LENGTH_SHORT).show();
+        }
+        build();
+    }
+
+    /** "+ Виджет" in a column: every kind of block, the ones already on this desk only when they may repeat. */
+    private void addWidget(int col) {
+        LinearLayout m = menu("Добавить виджет");
+        Set<String> on = new HashSet<>();
+        JSONArray cols = Desks.load(prefs).optJSONObject(curDesk).optJSONArray("cols");
+        for (int i = 0; cols != null && i < cols.length(); i++) {
+            JSONArray bl = cols.optJSONObject(i).optJSONArray("blocks");
+            for (int j = 0; bl != null && j < bl.length(); j++) on.add(bl.optJSONObject(j).optString("t"));
+        }
+        for (String[] t : Desks.TYPES) {
+            if (Desks.single(t[0]) && on.contains(t[0])) continue;
+            menuRow(m, t[1], false, () -> {
+                closeSheet();
+                try {
+                    JSONArray desks = Desks.load(prefs);
+                    desks.getJSONObject(curDesk).getJSONArray("cols").getJSONObject(col).getJSONArray("blocks").put(Desks.block(t[0]));
+                    Desks.save(prefs, desks);
+                } catch (org.json.JSONException ignored) {
+                    // constant keys
+                }
+                build();
+            });
+        }
+        openSheet(m);
+    }
+
+    private void startEditing() {
+        if (!"bento".equals(look) || nightActive) {
+            Toast.makeText(ctx, "Стол меняется в виде «Виджеты»: ⋮ → «Вид»", Toast.LENGTH_SHORT).show();
+            return;
+        }
+        editing = true;
+        build();
     }
 
     private View card(View v, int color, boolean fill) {
@@ -537,6 +721,10 @@ public class DashboardView extends FrameLayout {
         stack = null;
         aodClock = null;
         aodInfo = null;
+        watchProximity(false);
+        messagePanels.clear();
+        timerPanels.clear();
+        energyPanels.clear();
     }
 
     private View buildBlock(String type, JSONObject b) {
@@ -549,6 +737,42 @@ public class DashboardView extends FrameLayout {
             case "calls": return buildCalls();
             case "stats": return buildStats();
             case "weather": return buildWeather();
+            case "photos": return new PhotoFrame(ctx, th, prefs);
+            case "messages": {
+                MessagesPanel mp = new MessagesPanel(ctx, th, new MessagesPanel.Listener() {
+                    @Override
+                    public void onReply(MessagesPanel.Message m) {
+                        openReply(m);
+                    }
+
+                    @Override
+                    public void onSetup() {
+                        try {
+                            ctx.startActivity(MusicWatcher.accessIntent(ctx).addFlags(Intent.FLAG_ACTIVITY_NEW_TASK));
+                        } catch (ActivityNotFoundException ignored) {
+                            // no such screen on this firmware
+                        }
+                    }
+                });
+                messagePanels.add(mp);
+                mp.render(MusicWatcher.hasAccess(ctx));
+                return mp;
+            }
+            case "energy": {
+                EnergyPanel ep = new EnergyPanel(ctx, th, prefs);
+                energyPanels.add(ep);
+                ep.render(home.devices());
+                return ep;
+            }
+            case "timers": {
+                Timers.Panel tp = new Timers.Panel(ctx, th, prefs, () -> {
+                    for (Timers.Panel x : timerPanels) x.tick();
+                });
+                timerPanels.add(tp);
+                hOwners.add(tp.strip());
+                tp.tick();
+                return tp;
+            }
             default: return null;
         }
     }
@@ -857,6 +1081,9 @@ public class DashboardView extends FrameLayout {
             countMusic();
             if (callPanel != null) callPanel.tick();
             slowTick++;
+            for (Timers.Panel tp : timerPanels) tp.tick();
+            for (Timers.Timer t : Timers.finished(prefs)) timerDone(t);
+            if (slowTick % 3 == 0) for (MessagesPanel mp : messagePanels) mp.render(MusicWatcher.hasAccess(ctx));
             if (prefs.phoneCalls() && slowTick % 2 == 0) pollPhoneCall();
             if (callPanel != null && slowTick % 5 == 0) checkClipboard();
             if (haveLux) evalLux();
@@ -864,7 +1091,7 @@ public class DashboardView extends FrameLayout {
                 peeking = false;
                 build();
             }
-            if (!aod && !"night".equals(look) && prefs.aodAfter() > 0 && sheet == null && picker == null && !inCall()
+            if (!aod && !editing && !"night".equals(look) && prefs.aodAfter() > 0 && sheet == null && picker == null && !inCall()
                     && SystemClock.elapsedRealtime() - lastTouch > prefs.aodAfter() * 60_000L) {
                 aod = true;
                 peeking = false;
@@ -892,6 +1119,8 @@ public class DashboardView extends FrameLayout {
         }
         updateNightText();
         dawnTick();
+        autoMode();
+        if (lastMinute % 5 == 0 && SmartHome.configured(prefs) && !home.devices().isEmpty()) EnergyPanel.sample(prefs, home.devices());
         if (timeline != null) timeline.invalidate();
         if (ribbon != null) ribbon.invalidate();
         LocalDate now = LocalDate.now();
@@ -1028,6 +1257,8 @@ public class DashboardView extends FrameLayout {
     // ---------------------------------------------------------------- night & brightness
 
     private boolean isNight() {
+        Modes.Mode mode = activeMode();
+        if (mode != null && mode.night) return true; // "Сон" puts the night on at any hour
         if (!prefs.nightMode()) return false;
         switch (prefs.nightTrigger()) {
             case "light":
@@ -1817,6 +2048,346 @@ public class DashboardView extends FrameLayout {
         }
     }
 
+    // ---------------------------------------------------------------- modes
+
+    private Modes.Mode activeMode() {
+        String id = prefs.raw().getString("mode", "");
+        return id.isEmpty() ? null : Modes.byId(Modes.load(prefs), id);
+    }
+
+    private void openModes() {
+        LinearLayout m = menu("Режим");
+        Modes.Mode cur = activeMode();
+        for (Modes.Mode md : Modes.load(prefs)) {
+            menuRow(m, md.name, cur != null && cur.id.equals(md.id), () -> {
+                closeSheet();
+                applyMode(md);
+            });
+        }
+        menuRow(m, "Без режима", cur == null, () -> {
+            closeSheet();
+            applyMode(null);
+        });
+        m.addView(caption(""));
+        menuRow(m, "Настроить режимы…", false, () -> {
+            closeSheet();
+            ctx.startActivity(new Intent(ctx, SettingsActivity.class).putExtra(SettingsActivity.EXTRA_PAGE, "modes")
+                    .addFlags(Intent.FLAG_ACTIVITY_NEW_TASK));
+        });
+        openSheet(m);
+    }
+
+    /** Switches to a mode (null: none): its desk, volume, devices, PC macro and "do not disturb". */
+    private void applyMode(Modes.Mode md) {
+        Modes.Mode was = activeMode();
+        prefs.raw().edit().putString("mode", md == null ? "" : md.id).apply();
+        android.app.NotificationManager nm = ctx.getSystemService(android.app.NotificationManager.class);
+        boolean policy = nm != null && nm.isNotificationPolicyAccessGranted();
+        if (md == null) {
+            if (was != null && was.dnd && policy) nm.setInterruptionFilter(android.app.NotificationManager.INTERRUPTION_FILTER_ALL);
+            peeking = false;
+            build();
+            flashBarLabel("Без режима");
+            return;
+        }
+        if (md.desk >= 0 && md.desk < Desks.load(prefs).length()) prefs.setDeskIndex(md.desk);
+        if (md.volume >= 0) {
+            int max = audio.getStreamMaxVolume(AudioManager.STREAM_MUSIC);
+            audio.setStreamVolume(AudioManager.STREAM_MUSIC, Math.round(max * md.volume / 100f), 0);
+        }
+        if (policy) {
+            nm.setInterruptionFilter(md.dnd ? android.app.NotificationManager.INTERRUPTION_FILTER_PRIORITY
+                    : android.app.NotificationManager.INTERRUPTION_FILTER_ALL);
+        }
+        Map<String, HomeDevice> devs = home.devices();
+        for (String id : md.on) {
+            HomeDevice d = devs.get(id);
+            if (d == null || !d.available) continue;
+            if (d.kind == HomeDevice.SCENE) homeSend(d, null, () -> home.runScene(d));
+            else homeSend(d, x -> x.on = true, () -> home.setOn(d, true));
+        }
+        for (String id : md.off) {
+            HomeDevice d = devs.get(id);
+            if (d != null && d.available && d.canToggle) homeSend(d, x -> x.on = false, () -> home.setOn(d, false));
+        }
+        PcClient c = pc;
+        if (!md.macro.isEmpty() && c != null && pcOnline) io.execute(() -> c.run(md.macro));
+        peeking = false;
+        aod = false;
+        build();
+        flashBarLabel(md.name);
+    }
+
+    /** Every minute: a mode's schedule or a meeting in the calendar switches modes, a hand-picked one stays until it changes. */
+    private void autoMode() {
+        List<Modes.Mode> modes = Modes.load(prefs);
+        LocalDateTime now = LocalDateTime.now();
+        int minute = now.getHour() * 60 + now.getMinute(), wd = now.getDayOfWeek().getValue();
+        boolean meeting = false;
+        for (Meetings.Meeting m : Meetings.upcoming(todayEvents, System.currentTimeMillis())) meeting |= m.now(System.currentTimeMillis());
+        Modes.Mode want = null;
+        for (Modes.Mode md : modes) {
+            if (md.meeting && meeting || md.scheduled(minute, wd)) {
+                want = md;
+                break;
+            }
+        }
+        String wantId = want == null ? "" : want.id;
+        if (autoWanted == null) {
+            autoWanted = wantId; // the first minute after a start keeps what is on
+            return;
+        }
+        if (wantId.equals(autoWanted)) return;
+        String was = autoWanted;
+        autoWanted = wantId;
+        Modes.Mode cur = activeMode();
+        if (want != null) applyMode(want);
+        else if (cur != null && cur.id.equals(was)) applyMode(null); // the scheduled time is over
+    }
+
+    // ---------------------------------------------------------------- messages, timers, voice
+
+    /** Reply to a message right here: a field, quick answers, "Отправить". */
+    private void openReply(MessagesPanel.Message msg) {
+        LinearLayout m = menu(msg.who);
+        TextView quote = text(th.dim, 14);
+        quote.setText(msg.text);
+        quote.setMaxLines(3);
+        m.addView(quote, margins(-1, -2, 4, 0, 0, 10));
+        EditText field = new EditText(ctx);
+        field.setHint("Сообщение");
+        field.setHintTextColor(th.dim);
+        field.setTextColor(th.text);
+        field.setBackground(rounded(groupColor(), Ui.R_GROUP));
+        field.setPadding(px(16), px(12), px(16), px(12));
+        m.addView(field, margins(-1, -2, 0, 0, 0, 8));
+        LinearLayout quick = new LinearLayout(ctx);
+        for (String q : new String[]{"Ок", "Перезвоню", "Скоро буду", "Занят, позже напишу"}) {
+            quick.addView(Ui.pill(ctx, q, groupColor(), th.text, v -> sendReply(msg, q)), margins(-2, -2, 0, 0, 6, 0));
+        }
+        HorizontalScrollView hs = new HorizontalScrollView(ctx);
+        hs.setHorizontalScrollBarEnabled(false);
+        hs.addView(quick);
+        m.addView(hs, margins(-1, -2, 0, 0, 0, 10));
+        m.addView(Ui.pill(ctx, "Отправить", th.accent, DashTheme.onColor(th.accent), v -> sendReply(msg, field.getText().toString())));
+        openSheet(m);
+        ui.removeCallbacks(autoCloseSheet);
+        ui.postDelayed(autoCloseSheet, 120_000);
+    }
+
+    private void sendReply(MessagesPanel.Message msg, String text) {
+        if (text.trim().isEmpty()) return;
+        String err = MessagesPanel.reply(ctx, msg, text.trim());
+        Toast.makeText(ctx, err == null ? "Отправлено" : err, Toast.LENGTH_SHORT).show();
+        if (err == null) closeSheet();
+    }
+
+    /** A timer ran out: the alarm sound for a few seconds, a line at the top, the screen wakes. */
+    private void timerDone(Timers.Timer t) {
+        if (aod) {
+            aod = false;
+            lastTouch = SystemClock.elapsedRealtime();
+            build();
+        }
+        flashLive((t.round > 0 ? (t.rest ? "Перерыв окончен · за работу" : "Помодоро готово · перерыв") : "Таймер «" + t.label + "» готов"));
+        try {
+            if (ringing != null) ringing.stop();
+            ringing = RingtoneManager.getRingtone(ctx, RingtoneManager.getDefaultUri(RingtoneManager.TYPE_ALARM));
+            if (ringing != null) {
+                ringing.play();
+                Ringtone r = ringing;
+                ui.postDelayed(r::stop, 6000);
+            }
+        } catch (RuntimeException ignored) {
+            // no sound
+        }
+        say(t.round > 0 ? (t.rest ? "Перерыв окончен" : "Помодоро готово, перерыв") : "Таймер готов");
+    }
+
+    /** Speaks, when the phone has a voice. */
+    private void say(String text) {
+        if (tts == null) {
+            tts = new android.speech.tts.TextToSpeech(ctx, st -> {
+                ttsReady = st == android.speech.tts.TextToSpeech.SUCCESS;
+                if (ttsReady) {
+                    tts.setLanguage(Ui.RU);
+                    tts.speak(text, android.speech.tts.TextToSpeech.QUEUE_FLUSH, null, "deskdash");
+                }
+            });
+            return;
+        }
+        if (ttsReady) tts.speak(text, android.speech.tts.TextToSpeech.QUEUE_FLUSH, null, "deskdash");
+    }
+
+    /** "Слушаю…": the phone's speech recognition, then the command. */
+    private void listenVoice() {
+        if (ctx.checkSelfPermission(android.Manifest.permission.RECORD_AUDIO) != android.content.pm.PackageManager.PERMISSION_GRANTED) {
+            if (ctx instanceof android.app.Activity) {
+                ((android.app.Activity) ctx).requestPermissions(new String[]{android.Manifest.permission.RECORD_AUDIO}, 7);
+            }
+            Toast.makeText(ctx, "Разреши микрофон и нажми ещё раз", Toast.LENGTH_SHORT).show();
+            return;
+        }
+        if (!Voice.available(ctx)) {
+            Toast.makeText(ctx, "На телефоне нет распознавания речи: поставь Google или «Яндекс» с голосовым вводом",
+                    Toast.LENGTH_LONG).show();
+            return;
+        }
+        LinearLayout m = menu("Слушаю…");
+        TextView heard = text(th.text, 20);
+        heard.setText("Скажи, например: «включи свет», «таймер на 10 минут», «режим работа»");
+        heard.setTextColor(th.dim);
+        m.addView(heard, margins(-1, -2, 4, 0, 0, 12));
+        openSheet(m);
+        voice.listen(ctx, new Voice.Listener() {
+            @Override
+            public void partial(String t) {
+                heard.setTextColor(th.text);
+                heard.setText(t);
+            }
+
+            @Override
+            public void done(String t) {
+                heard.setTextColor(th.text);
+                heard.setText(Voice.handle(t, voiceHost));
+                ui.postDelayed(DashboardView.this::closeSheet, 2500);
+            }
+
+            @Override
+            public void failed(String why) {
+                heard.setText(why);
+                ui.postDelayed(DashboardView.this::closeSheet, 2000);
+            }
+        });
+    }
+
+    private final Voice.Host voiceHost = new Voice.Host() {
+        @Override
+        public Map<String, HomeDevice> devices() {
+            return home.devices();
+        }
+
+        @Override
+        public void device(HomeDevice d, String action, int value) {
+            switch (action) {
+                case "run":
+                    homeAction(d, null, () -> home.runScene(d));
+                    break;
+                case "brightness":
+                    homeAction(d, x -> {
+                        x.on = true;
+                        x.brightness = value;
+                    }, () -> home.brightness(d, value));
+                    break;
+                default:
+                    boolean on = "on".equals(action);
+                    homeAction(d, x -> x.on = on, () -> home.setOn(d, on));
+                    break;
+            }
+        }
+
+        @Override
+        public void allOff() {
+            for (HomeDevice d : home.devices().values()) {
+                if (d.active() && (d.kind == HomeDevice.LIGHT || d.kind == HomeDevice.SWITCH)) {
+                    homeAction(d, x -> x.on = false, () -> home.setOn(d, false));
+                }
+            }
+        }
+
+        @Override
+        public boolean mode(String name) {
+            for (Modes.Mode md : Modes.load(prefs)) {
+                String n = md.name.toLowerCase(Ui.RU);
+                if (n.startsWith(name.length() > 3 ? name.substring(0, name.length() - 1) : name) || name.startsWith(n)) {
+                    applyMode(md);
+                    return true;
+                }
+            }
+            return false;
+        }
+
+        @Override
+        public void timer(String label, long ms) {
+            Timers.start(prefs, label, ms);
+            for (Timers.Panel tp : timerPanels) tp.tick();
+        }
+
+        @Override
+        public void pomodoro() {
+            Timers.pomodoro(prefs, 1, false);
+        }
+
+        @Override
+        public void media(String what) {
+            switch (what) {
+                case "louder":
+                    audio.adjustStreamVolume(AudioManager.STREAM_MUSIC, AudioManager.ADJUST_RAISE, AudioManager.FLAG_SHOW_UI);
+                    break;
+                case "quieter":
+                    audio.adjustStreamVolume(AudioManager.STREAM_MUSIC, AudioManager.ADJUST_LOWER, AudioManager.FLAG_SHOW_UI);
+                    break;
+                case "next":
+                    transport(1);
+                    break;
+                case "prev":
+                    transport(-1);
+                    break;
+                default: {
+                    String[] np = nowPlaying();
+                    boolean playing = np != null;
+                    if ("pause".equals(what) == playing) transport(0);
+                    break;
+                }
+            }
+        }
+
+        @Override
+        public String weather() {
+            Weather w = weather;
+            if (w == null || Double.isNaN(w.temp)) return "Погоды пока нет";
+            HomeDevice out = outdoorSensor();
+            Weather.Day d = w.today();
+            return "Сейчас " + Weather.deg(out != null ? out.temperature() : w.temp) + ", " + Weather.text(w.code).toLowerCase(Ui.RU)
+                    + (d == null ? "" : ", днём до " + Weather.deg(d.max));
+        }
+
+        @Override
+        public String agenda() {
+            List<CalEvent> left = new ArrayList<>();
+            long now = System.currentTimeMillis();
+            for (CalEvent e : todayEvents) if (!e.allDay && e.end > now) left.add(e);
+            if (left.isEmpty()) return "На сегодня встреч больше нет";
+            CalEvent n = left.get(0);
+            return "Сегодня ещё " + StatsPanel.plural(left.size(), "событие", "события", "событий") + ", следующее — "
+                    + n.title + " в " + fmt(n.start);
+        }
+
+        @Override
+        public void say(String text) {
+            DashboardView.this.say(text);
+        }
+    };
+
+    /** Once a day all settings go to the hub (and from there to the NAS backup), under this phone's name. */
+    private void saveToHub() {
+        if (!HubClient.configured(prefs)) return;
+        android.content.SharedPreferences g = ctx.getSharedPreferences("deskdash_profiles", Context.MODE_PRIVATE);
+        String day = LocalDate.now().toString();
+        if (day.equals(g.getString("hub_saved", ""))) return;
+        try {
+            new HubClient(prefs).saveSettings(deviceName(), Backup.export(ctx));
+            g.edit().putString("hub_saved", day).apply();
+        } catch (Exception ignored) {
+            // the hub is away: tomorrow
+        }
+    }
+
+    static String deviceName() {
+        String m = Build.MODEL == null ? "Телефон" : Build.MODEL;
+        return m.trim().isEmpty() ? "Телефон" : m.trim();
+    }
+
     /** Two ways to see the track: Spotify's own switch (no permission at all) or one switch for DeskDash. */
     private void openMusicHelp() {
         LinearLayout m = menu("Что играет");
@@ -2347,6 +2918,7 @@ public class DashboardView extends FrameLayout {
         boolean on = SmartHome.configured(prefs);
         String err = home.error();
         for (HomePanel p : homePanels) p.render(home.devices(), on, err);
+        for (EnergyPanel ep : energyPanels) ep.render(home.devices());
         // sensor readings changed: the weather shows them too
         HomeDevice out = outdoorSensor();
         String sig = (out == null ? Double.NaN : out.temperature()) + indoorText(out);
@@ -2398,7 +2970,7 @@ public class DashboardView extends FrameLayout {
 
     private void pollHome(boolean forceYandex) {
         boolean auto = !prefs.autoCall().isEmpty() || !prefs.autoNight().isEmpty() || !prefs.autoDawn().isEmpty();
-        boolean wx = !weatherPanels.isEmpty() || weatherLine != null || aodInfo != null;
+        boolean wx = !weatherPanels.isEmpty() || weatherLine != null || aodInfo != null || !energyPanels.isEmpty();
         if (homePanels.isEmpty() && !prefs.live() && !auto && !wx || !SmartHome.configured(prefs) || !homeBusy.compareAndSet(false, true)) return;
         io.execute(() -> {
             try {
@@ -2853,6 +3425,20 @@ public class DashboardView extends FrameLayout {
             text = d.name + " · " + d.status() + (d.remainingMin > 0 ? " · до " + HomeDevice.finishAt(d.remainingMin) : "");
             action = () -> openHomeSheet(d);
         }
+        Updates.Release upd = update;
+        if (text == null && upd != null && !updateHidden && !nightActive) {
+            text = "Новая версия DeskDash " + upd.version + " · скачать";
+            color = th.accent;
+            action = () -> {
+                updateHidden = true;
+                try {
+                    ctx.startActivity(new Intent(Intent.ACTION_VIEW, Uri.parse(upd.apk)).addFlags(Intent.FLAG_ACTIVITY_NEW_TASK));
+                } catch (ActivityNotFoundException ignored) {
+                    // no browser
+                }
+                renderLive();
+            };
+        }
         Weather w = weather;
         String rain = text == null && w != null && prefs.weatherRain() && !nightActive ? w.precipitationSoon(now) : null;
         if (rain != null && !rain.equals(rainHidden)) {
@@ -2992,9 +3578,19 @@ public class DashboardView extends FrameLayout {
             closeSheet();
             host.open(StreamActivity.class);
         });
+        menuRow(m, "Голос: скажи команду", false, () -> {
+            closeSheet();
+            listenVoice();
+        });
         menuRow(m, "Статистика дня", false, this::openDayDetails);
         if (Weather.configured(prefs)) menuRow(m, "Погода", false, this::openWeatherSheet);
+        Modes.Mode cur = activeMode();
+        menuRow(m, "Режим: " + (cur == null ? "нет" : cur.name) + "…", false, this::openModes);
         menuRow(m, "Вид: " + lookName(prefs.uiStyle()) + "…", false, this::openLooks);
+        menuRow(m, "Изменить этот стол", false, () -> {
+            closeSheet();
+            startEditing();
+        });
         menuRow(m, "Столы и блоки…", false, () -> {
             closeSheet();
             host.open(DeskEditorActivity.class);
@@ -3048,7 +3644,8 @@ public class DashboardView extends FrameLayout {
     /** Pill at the bottom: profile name, one dot per desk, menu button. */
     private void buildBar(int di, boolean noOtherMenu) {
         List<Profiles.Profile> ps = Profiles.list(ctx);
-        hasBar = !(deskCount < 2 && ps.size() < 2 && !noOtherMenu);
+        // always there: it holds the voice button and ⋮ with modes, editing and the rest
+        hasBar = true;
         if (!hasBar) return;
         LinearLayout bar = new LinearLayout(ctx);
         bar.setGravity(Gravity.CENTER_VERTICAL);
@@ -3056,9 +3653,18 @@ public class DashboardView extends FrameLayout {
         bar.setBackground(rounded(th.surface, 100));
         bar.setAlpha(0.92f);
         bar.setOnLongClickListener(v -> {
-            openMenu();
+            startEditing();
             return true;
         });
+        Modes.Mode mode = activeMode();
+        if (mode != null) {
+            TextView mt = text(mode.color, 12);
+            mt.setTypeface(Ui.font(600));
+            mt.setText(mode.name);
+            mt.setPadding(px(2), px(6), px(8), px(6));
+            mt.setOnClickListener(v -> openModes());
+            bar.addView(mt);
+        }
         if (ps.size() > 1) {
             TextView who = text(th.dim, 12);
             who.setText(Profiles.name(ctx, Profiles.active(ctx)));
@@ -3086,6 +3692,10 @@ public class DashboardView extends FrameLayout {
         barLabel.setVisibility(GONE);
         barLabel.setPadding(px(6), 0, px(2), 0);
         bar.addView(barLabel);
+        ImageView mic = iconButton(R.drawable.ic_mic, th.dim, 26);
+        mic.setContentDescription("Голос");
+        mic.setOnClickListener(v -> listenVoice());
+        bar.addView(mic, new LinearLayout.LayoutParams(px(26), px(26)));
         ImageView more = iconButton(R.drawable.ic_more, th.dim, 26);
         more.setOnClickListener(v -> openMenu());
         bar.addView(more, new LinearLayout.LayoutParams(px(26), px(26)));
@@ -3193,7 +3803,7 @@ public class DashboardView extends FrameLayout {
             return d != null && d.available && !Double.isNaN(d.temperature()) ? d : null;
         }
         for (HomeDevice d : devs.values()) {
-            if (d.available && !Double.isNaN(d.temperature()) && OUTSIDE.matcher(d.name.toLowerCase(Ui.RU)).find()) return d;
+            if (d.available && !Double.isNaN(d.temperature()) && d.outdoor()) return d;
         }
         return null;
     }
@@ -3208,7 +3818,7 @@ public class DashboardView extends FrameLayout {
             if (!d.available || d == out || !id.isEmpty() && !d.id.equals(id)) continue;
             double t = d.temperature();
             if (Double.isNaN(t) || d.kind != HomeDevice.SENSOR && d.kind != HomeDevice.CLIMATE) continue;
-            if (id.isEmpty() && OUTSIDE.matcher(d.name.toLowerCase(Ui.RU)).find()) continue;
+            if (id.isEmpty() && d.outdoor()) continue;
             sum += t;
             n++;
             if (hum < 0) hum = d.humidity();
@@ -3304,7 +3914,7 @@ public class DashboardView extends FrameLayout {
         int idx = Math.floorMod(prefs.standbyIndex(), kinds.size());
         String kind = kinds.get(idx);
         stack = new StackFrame(ctx, kinds.size());
-        boolean own = "weather".equals(kind) || "music".equals(kind);
+        boolean own = "weather".equals(kind) || "photos".equals(kind);
         if (!own) {
             stack.setBackground(rounded(th.surface, Ui.R_WIDGET));
             stack.setPadding(px(18), px(16), px(26), px(16));
@@ -3369,7 +3979,10 @@ public class DashboardView extends FrameLayout {
         k.add("music");
         if (SmartHome.configured(prefs)) k.add("home");
         k.add("calls");
+        k.add("timers");
+        if (MusicWatcher.hasAccess(ctx)) k.add("messages");
         k.add("stats");
+        if (HubClient.configured(prefs)) k.add("photos");
         return k;
     }
 
@@ -3526,6 +4139,7 @@ public class DashboardView extends FrameLayout {
         aodInfo.setGravity(Gravity.CENTER_HORIZONTAL);
         content.addView(aodInfo, margins(-2, -2, 0, 8, 0, 0));
         renderAodInfo();
+        if (prefs.aodShows("wave")) watchProximity(true);
     }
 
     /** Lines under the always-on clock: date and battery, weather, the next event, what plays. */
@@ -3562,6 +4176,63 @@ public class DashboardView extends FrameLayout {
             String[] np = nowPlaying();
             if (np != null) aodLine("♪  " + np[0] + (np[1].isEmpty() ? "" : " — " + np[1]), dim, 15, 400, 4);
         }
+        if (prefs.aodShows("notifications")) {
+            // as on Samsung's AOD: one small icon per app with something unread
+            LinearLayout icons = new LinearLayout(ctx);
+            icons.setGravity(Gravity.CENTER);
+            Set<String> seen = new HashSet<>();
+            for (android.service.notification.StatusBarNotification sbn : MediaListenerService.active()) {
+                android.app.Notification n = sbn.getNotification();
+                if ((n.flags & android.app.Notification.FLAG_ONGOING_EVENT) != 0 || sbn.getPackageName().equals(ctx.getPackageName())
+                        || android.app.Notification.CATEGORY_TRANSPORT.equals(n.category) || !seen.add(sbn.getPackageName())) continue;
+                Drawable d = null;
+                try {
+                    if (n.getSmallIcon() != null) d = n.getSmallIcon().loadDrawable(ctx);
+                } catch (RuntimeException ignored) {
+                    // the app's resources are out of reach
+                }
+                if (d == null) continue;
+                d.setTint(dim);
+                ImageView iv = new ImageView(ctx);
+                iv.setImageDrawable(d);
+                icons.addView(iv, margins(px(18), px(18), 5, 0, 5, 0));
+                if (icons.getChildCount() >= 7) break;
+            }
+            if (icons.getChildCount() > 0) aodInfo.addView(icons, margins(-2, -2, 0, 10, 0, 0));
+        }
+    }
+
+    /** A hand passing over the top of the phone wakes the always-on or night screen, as on Samsung's. */
+    private final SensorEventListener proximity = new SensorEventListener() {
+        @Override
+        public void onSensorChanged(SensorEvent e) {
+            boolean n = e.values[0] < Math.min(3f, e.sensor.getMaximumRange());
+            long now = SystemClock.elapsedRealtime();
+            if (n && !near) nearAt = now;
+            // a short cover and away again: a wave, not a phone put face down or into a pocket
+            if (!n && near && now - nearAt < 1500 && ("aod".equals(look) || "night".equals(look) && !peeking)) {
+                lastTouch = now;
+                if (aod) {
+                    aod = false;
+                    build();
+                } else {
+                    peek();
+                }
+            }
+            near = n;
+        }
+
+        @Override
+        public void onAccuracyChanged(Sensor s, int accuracy) {}
+    };
+
+    private void watchProximity(boolean on) {
+        SensorManager sm = ctx.getSystemService(SensorManager.class);
+        if (sm == null) return;
+        sm.unregisterListener(proximity);
+        Sensor s = on ? sm.getDefaultSensor(Sensor.TYPE_PROXIMITY) : null;
+        if (s != null) sm.registerListener(proximity, s, SensorManager.SENSOR_DELAY_NORMAL);
+        near = false;
     }
 
     private TextView aodLine(String s, int color, float sp, int weight, float top) {
@@ -4076,10 +4747,23 @@ public class DashboardView extends FrameLayout {
     private ImageView iconButton(int res, int tint, int sizeDp) {
         ImageView v = new ImageView(ctx);
         v.setImageResource(res);
+        v.setContentDescription(iconName(res));
         v.setImageTintList(ColorStateList.valueOf(tint));
         int p = px(sizeDp * 0.2f);
         v.setPadding(p, p, p, p);
         return v;
+    }
+
+    /** What an icon button does, for TalkBack. */
+    private static String iconName(int res) {
+        if (res == R.drawable.ic_more) return "Меню";
+        if (res == R.drawable.ic_prev) return "Предыдущий трек";
+        if (res == R.drawable.ic_next) return "Следующий трек";
+        if (res == R.drawable.ic_play || res == R.drawable.ic_pause) return "Играть или пауза";
+        if (res == R.drawable.ic_devices) return "Где играть";
+        if (res == R.drawable.ic_chevron_left) return "Назад";
+        if (res == R.drawable.ic_chevron_right) return "Вперёд";
+        return null;
     }
 
     private GradientDrawable rounded(int color, float radiusDp) {

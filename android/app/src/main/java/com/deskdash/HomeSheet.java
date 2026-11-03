@@ -3,21 +3,29 @@ package com.deskdash;
 import android.content.Context;
 import android.content.res.ColorStateList;
 import android.graphics.Bitmap;
+import android.graphics.Canvas;
 import android.graphics.Outline;
-import android.graphics.Typeface;
+import android.graphics.Paint;
+import android.graphics.RectF;
 import android.graphics.drawable.GradientDrawable;
 import android.os.Handler;
 import android.os.Looper;
 import android.util.TypedValue;
 import android.view.Gravity;
+import android.view.HapticFeedbackConstants;
+import android.view.MotionEvent;
 import android.view.View;
 import android.view.ViewOutlineProvider;
+import android.widget.FrameLayout;
 import android.widget.ImageView;
 import android.widget.LinearLayout;
-import android.widget.SeekBar;
 import android.widget.TextView;
 
-/** Detail card for one device (long tap on a tile): on/off, brightness, colour, temperature. */
+/**
+ * Detail card for one device (long tap on a tile), after Apple's Home: the round icon and the name on top,
+ * a big slider that fills with the device's colour for brightness, white-light and colour swatches,
+ * round − / + for a thermostat, and pill buttons for printers and vacuums.
+ */
 final class HomeSheet {
     interface Actions {
         void setOn(boolean on);
@@ -48,6 +56,7 @@ final class HomeSheet {
     private final Context ctx;
     private final DashTheme th;
     private final float dp;
+    private int kc;
 
     private HomeSheet(Context c, DashTheme th) {
         ctx = c;
@@ -60,17 +69,40 @@ final class HomeSheet {
     }
 
     private View card(HomeDevice d, Actions a) {
+        kc = th.isNight() ? th.accent : HomePanel.kindColor(d);
         LinearLayout card = new LinearLayout(ctx);
         card.setOrientation(LinearLayout.VERTICAL);
 
-        TextView title = text(th.text, 18);
+        // the round icon, the name, where it is and its state
+        LinearLayout head = new LinearLayout(ctx);
+        head.setGravity(Gravity.CENTER_VERTICAL);
+        FrameLayout bubble = new FrameLayout(ctx);
+        GradientDrawable ring = new GradientDrawable();
+        ring.setShape(GradientDrawable.OVAL);
+        ring.setColor(d.active() ? kc : Ui.fill(th));
+        bubble.setBackground(ring);
+        ImageView ic = new ImageView(ctx);
+        ic.setImageResource(HomePanel.iconFor(d));
+        ic.setImageTintList(ColorStateList.valueOf(d.active() ? DashTheme.onColor(kc) : th.dim));
+        bubble.addView(ic, new FrameLayout.LayoutParams(px(24), px(24), Gravity.CENTER));
+        head.addView(bubble, new LinearLayout.LayoutParams(px(48), px(48)));
+        LinearLayout names = new LinearLayout(ctx);
+        names.setOrientation(LinearLayout.VERTICAL);
+        TextView title = Ui.text(ctx, th.text, 20, 700);
         title.setText(d.name);
-        title.setTypeface(Typeface.create("sans-serif-medium", Typeface.NORMAL));
-        card.addView(title);
-        TextView sub = text(th.dim, 13);
+        title.setSingleLine();
+        names.addView(title);
+        TextView sub = text(th.dim, 14);
         String src = "ha".equals(d.source) ? "Home Assistant" : "bambu".equals(d.source) ? "по локальной сети" : "Яндекс";
-        sub.setText(d.room.isEmpty() ? src : d.room + " · " + src);
-        card.addView(sub, lp(2, 10));
+        String state = d.kind == HomeDevice.CLIMATE && !d.state.isEmpty() ? d.status() + " · " + d.state
+                : d.progress >= 0 && d.on ? d.progress + "%" + ("Пауза".equals(d.state) ? " · пауза" : "") : d.status();
+        sub.setText(state + " · " + (d.room.isEmpty() ? src : d.room));
+        sub.setTextColor(d.alert ? Ui.RED : th.dim);
+        names.addView(sub);
+        LinearLayout.LayoutParams nl = new LinearLayout.LayoutParams(0, -2, 1);
+        nl.leftMargin = px(14);
+        head.addView(names, nl);
+        card.addView(head, lp(0, 16));
 
         if (!d.image.isEmpty()) {
             ImageView pic = new ImageView(ctx);
@@ -79,7 +111,7 @@ final class HomeSheet {
             pic.setOutlineProvider(new ViewOutlineProvider() {
                 @Override
                 public void getOutline(View v, Outline o) {
-                    o.setRoundRect(0, 0, v.getWidth(), v.getHeight(), 14 * dp);
+                    o.setRoundRect(0, 0, v.getWidth(), v.getHeight(), Ui.R_TILE * dp);
                 }
             });
             pic.setClipToOutline(true);
@@ -96,50 +128,42 @@ final class HomeSheet {
             };
             refresh.run();
             card.addView(pic, new LinearLayout.LayoutParams(-1, px(200)));
-            ((LinearLayout.LayoutParams) pic.getLayoutParams()).bottomMargin = px(12);
+            ((LinearLayout.LayoutParams) pic.getLayoutParams()).bottomMargin = px(14);
         }
 
-        TextView status = text(d.alert ? 0xFFE5534B : th.accent, 26);
-        status.setTypeface(Typeface.create("sans-serif-light", Typeface.NORMAL));
-        status.setText(d.kind == HomeDevice.CLIMATE && !d.state.isEmpty() ? d.status() + " · " + d.state
-                : d.progress >= 0 && d.on ? d.progress + "%" + ("Пауза".equals(d.state) ? " · пауза" : "") : d.status());
-        card.addView(status, lp(0, d.progress >= 0 && d.on ? 6 : 12));
-
         if (d.progress >= 0 && d.on) {
-            android.widget.ProgressBar pb = new android.widget.ProgressBar(ctx, null, android.R.attr.progressBarStyleHorizontal);
-            pb.setMax(100);
-            pb.setProgress(d.progress);
-            pb.setProgressTintList(ColorStateList.valueOf(th.accent));
-            pb.setProgressBackgroundTintList(ColorStateList.valueOf(th.line));
-            card.addView(pb, lp(0, 4));
+            Slider bar = new Slider(ctx, d.progress, false);
+            card.addView(bar, new LinearLayout.LayoutParams(-1, px(14)));
             if (d.remainingMin >= 0) {
                 TextView left = text(th.text, 15);
                 left.setText("Осталось " + HomeDevice.minutes(d.remainingMin) + " · готово в " + HomeDevice.finishAt(d.remainingMin));
-                card.addView(left, lp(2, 6));
+                card.addView(left, lp(8, 6));
             }
         }
         if (!d.job.isEmpty()) {
-            TextView job = text(th.text, 14);
+            TextView job = text(th.text, 15);
             job.setText(d.job);
-            card.addView(job, lp(0, 4));
+            card.addView(job, lp(4, 4));
         }
         if (!d.detail.isEmpty()) {
-            TextView det = text(th.dim, 13);
+            TextView det = text(th.dim, 14);
             det.setLineSpacing(0, 1.2f);
             det.setText(d.detail);
             card.addView(det, lp(0, 12));
         }
         if (!d.cmds.isEmpty() && d.available) {
             LinearLayout row = row();
-            String[][] names = {{"resume", "Продолжить"}, {"pause", "Пауза"}, {"stop", "Остановить"}, {"light", "Подсветка"}};
-            for (String[] n : names) {
+            String[][] names2 = {{"resume", "Продолжить"}, {"pause", "Пауза"}, {"stop", "Остановить"}, {"light", "Подсветка"}};
+            for (String[] n : names2) {
                 if (!d.cmds.containsKey(n[0])) continue;
-                TextView b = pill(n[1], false, null);
+                boolean stop = "stop".equals(n[0]);
+                TextView b = pill(n[1], stop ? 0x33FF453A : Ui.fill(th), stop ? Ui.RED : th.text, null);
                 b.setOnClickListener(v -> {
-                    if ("stop".equals(n[0]) && v.getTag() == null) {
+                    if (stop && v.getTag() == null) {
                         v.setTag("armed");
                         b.setText("Точно?");
-                        b.setTextColor(0xFFE5534B);
+                        b.setBackground(Ui.round(ctx, Ui.RED, 100));
+                        b.setTextColor(0xFFFFFFFF);
                         a.touched();
                         return;
                     }
@@ -147,77 +171,58 @@ final class HomeSheet {
                 });
                 row.addView(b, weight());
             }
-            card.addView(row, lp(4, 12));
+            card.addView(row, lp(8, 12));
         }
 
         if (d.kind == HomeDevice.SCENE) {
-            card.addView(pill("Запустить", true, v -> a.run()), lp(0, 4));
+            card.addView(pill("Запустить", kc, DashTheme.onColor(kc), v -> a.run()), lp(0, 4));
             return card;
-        }
-        if (d.canToggle && d.available) {
-            String[] w = d.onOffWords();
-            LinearLayout row = row();
-            row.addView(pill(w[0], d.on, v -> a.setOn(true)), weight());
-            row.addView(pill(w[1], !d.on, v -> a.setOn(false)), weight());
-            card.addView(row, lp(0, 12));
         }
 
         if (d.dimmable && d.available) {
-            TextView label = text(th.dim, 13);
-            int b0 = d.brightness >= 0 ? d.brightness : 100;
-            label.setText("Яркость " + b0 + "%");
-            card.addView(label);
-            SeekBar sb = new SeekBar(ctx);
-            sb.setMax(99);
-            sb.setProgress(Math.max(0, b0 - 1));
-            sb.setProgressTintList(ColorStateList.valueOf(th.accent));
-            sb.setThumbTintList(ColorStateList.valueOf(th.accent));
-            sb.setProgressBackgroundTintList(ColorStateList.valueOf(th.line));
-            sb.setOnSeekBarChangeListener(new SeekBar.OnSeekBarChangeListener() {
+            // the big slider: drag to set the brightness, it fills with the lamp's colour
+            int b0 = d.on && d.brightness >= 0 ? d.brightness : d.on ? 100 : 0;
+            Slider sb = new Slider(ctx, b0, true);
+            sb.listener = new SliderListener() {
                 @Override
-                public void onProgressChanged(SeekBar s, int p, boolean user) {
-                    label.setText("Яркость " + (p + 1) + "%");
-                    if (user) a.touched();
-                }
-
-                @Override
-                public void onStartTrackingTouch(SeekBar s) {
+                public void moving() {
                     a.touched();
                 }
 
                 @Override
-                public void onStopTrackingTouch(SeekBar s) {
-                    a.brightness(s.getProgress() + 1);
+                public void done(int pct) {
+                    if (pct <= 0) a.setOn(false);
+                    else a.brightness(pct);
                 }
-            });
-            card.addView(sb, lp(4, 12));
+            };
+            card.addView(sb, new LinearLayout.LayoutParams(-1, px(64)));
+            ((LinearLayout.LayoutParams) sb.getLayoutParams()).bottomMargin = px(14);
+        }
+        if (d.canToggle && d.available) {
+            String[] w = d.onOffWords();
+            LinearLayout row = row();
+            row.addView(pill(w[0], d.on ? kc : Ui.fill(th), d.on ? DashTheme.onColor(kc) : th.text, v -> a.setOn(true)), weight());
+            row.addView(pill(w[1], !d.on ? th.text : Ui.fill(th), !d.on ? th.bg : th.text, v -> a.setOn(false)), weight());
+            card.addView(row, lp(0, 14));
         }
 
         if (d.colorTemp && d.available) {
             card.addView(caption("Белый свет"));
             LinearLayout row = row();
             int mid = (d.minK + d.maxK) / 2;
-            row.addView(pill("Тёплый", false, v -> a.colorTemp(d.minK)), weight());
-            row.addView(pill("Дневной", false, v -> a.colorTemp(mid)), weight());
-            row.addView(pill("Холодный", false, v -> a.colorTemp(d.maxK)), weight());
-            card.addView(row, lp(4, 12));
+            int[][] whites = {{d.minK, 0xFFFFC27A}, {mid, 0xFFFFF1DC}, {d.maxK, 0xFFDCEBFF}};
+            for (int[] wt : whites) {
+                View dot = swatch(wt[1], v -> a.colorTemp(wt[0]));
+                row.addView(dot, swatchLp());
+            }
+            card.addView(row, lp(6, 14));
         }
 
         if (d.color && d.available) {
             card.addView(caption("Цвет"));
             LinearLayout row = row();
-            for (int c : COLORS) {
-                View dot = new View(ctx);
-                GradientDrawable g = new GradientDrawable();
-                g.setShape(GradientDrawable.OVAL);
-                g.setColor(c);
-                dot.setBackground(g);
-                dot.setOnClickListener(v -> a.color(c));
-                LinearLayout.LayoutParams l = new LinearLayout.LayoutParams(px(30), px(30));
-                l.rightMargin = px(8);
-                row.addView(dot, l);
-            }
-            card.addView(row, lp(4, 12));
+            for (int c : COLORS) row.addView(swatch(c, v -> a.color(c)), swatchLp());
+            card.addView(row, lp(6, 14));
         }
 
         if (d.kind == HomeDevice.CLIMATE && !Double.isNaN(d.target) && d.available) {
@@ -225,7 +230,7 @@ final class HomeSheet {
             LinearLayout row = row();
             row.setGravity(Gravity.CENTER_VERTICAL);
             double[] t = {d.target};
-            TextView val = text(th.text, 28);
+            TextView val = Ui.text(ctx, th.text, 40, 300);
             val.setGravity(Gravity.CENTER);
             val.setText(HomeDevice.deg(t[0]));
             Handler h = new Handler(Looper.getMainLooper());
@@ -234,44 +239,132 @@ final class HomeSheet {
                 double s = d.tStep > 0 ? d.tStep : 0.5;
                 t[0] = Math.max(d.tMin, Math.min(d.tMax, t[0] + ((int) v.getTag()) * s));
                 val.setText(HomeDevice.deg(t[0]));
+                v.performHapticFeedback(HapticFeedbackConstants.CLOCK_TICK);
                 a.touched();
                 h.removeCallbacks(send);
                 h.postDelayed(send, 900);
             };
-            TextView minus = pill("−", false, step);
+            TextView minus = round("−", step);
             minus.setTag(-1);
-            TextView plus = pill("+", false, step);
+            TextView plus = round("+", step);
             plus.setTag(1);
-            minus.setTextSize(TypedValue.COMPLEX_UNIT_SP, 22);
-            plus.setTextSize(TypedValue.COMPLEX_UNIT_SP, 22);
-            row.addView(minus, new LinearLayout.LayoutParams(px(64), px(48)));
+            row.addView(minus, new LinearLayout.LayoutParams(px(56), px(56)));
             row.addView(val, new LinearLayout.LayoutParams(0, -2, 1));
-            row.addView(plus, new LinearLayout.LayoutParams(px(64), px(48)));
-            card.addView(row, lp(4, 4));
+            row.addView(plus, new LinearLayout.LayoutParams(px(56), px(56)));
+            card.addView(row, lp(6, 4));
         }
         return card;
+    }
+
+    // ---------------------------------------------------------------- slider
+
+    /** A rounded bar filled from the left, like the brightness slider of iOS; a drag sets it, release sends it. */
+    private interface SliderListener {
+        void moving();
+
+        void done(int pct);
+    }
+
+    private final class Slider extends View {
+        final Paint p = new Paint(Paint.ANTI_ALIAS_FLAG);
+        final boolean interactive;
+        int value;
+        SliderListener listener;
+
+        Slider(Context c, int value, boolean interactive) {
+            super(c);
+            this.value = value;
+            this.interactive = interactive;
+            p.setTextSize(17 * dp);
+            p.setTypeface(Ui.font(600));
+        }
+
+        @Override
+        protected void onDraw(Canvas c) {
+            float w = getWidth(), h = getHeight(), r = Math.min(h / 2, 22 * dp);
+            p.setColor(Ui.fill(th));
+            c.drawRoundRect(new RectF(0, 0, w, h), r, r, p);
+            c.save();
+            android.graphics.Path clip = new android.graphics.Path();
+            clip.addRoundRect(new RectF(0, 0, w, h), r, r, android.graphics.Path.Direction.CW);
+            c.clipPath(clip);
+            p.setColor(kc);
+            c.drawRect(0, 0, w * value / 100f, h, p);
+            c.restore();
+            if (interactive) {
+                String s = value <= 0 ? "Выкл" : value + " %";
+                p.setColor(value > 12 ? DashTheme.onColor(kc) : th.text);
+                c.drawText(s, 18 * dp, h / 2 + p.getTextSize() * 0.35f, p);
+            }
+        }
+
+        @Override
+        public boolean onTouchEvent(MotionEvent e) {
+            if (!interactive) return false;
+            getParent().requestDisallowInterceptTouchEvent(true);
+            int v = Math.max(0, Math.min(100, Math.round(e.getX() / getWidth() * 100)));
+            if (v != value) {
+                if (v / 10 != value / 10) performHapticFeedback(HapticFeedbackConstants.CLOCK_TICK);
+                value = v;
+                invalidate();
+            }
+            if (listener != null) {
+                if (e.getActionMasked() == MotionEvent.ACTION_UP) listener.done(value);
+                else listener.moving();
+            }
+            return true;
+        }
     }
 
     // ---------------------------------------------------------------- helpers
 
     private TextView caption(String s) {
-        TextView t = text(th.dim, 13);
+        TextView t = text(th.dim, 14);
         t.setText(s);
         return t;
     }
 
-    private TextView pill(String label, boolean selected, View.OnClickListener l) {
-        TextView t = text(selected ? DashTheme.onColor(th.accent) : th.text, 14);
+    private TextView pill(String label, int bg, int fg, View.OnClickListener l) {
+        TextView t = Ui.text(ctx, fg, 15, 600);
         t.setText(label);
         t.setGravity(Gravity.CENTER);
         t.setSingleLine();
-        t.setPadding(px(10), px(10), px(10), px(10));
+        t.setPadding(px(12), px(12), px(12), px(12));
+        t.setBackground(Ui.round(ctx, bg, 100));
+        t.setOnClickListener(l);
+        return t;
+    }
+
+    private TextView round(String label, View.OnClickListener l) {
+        TextView t = Ui.text(ctx, th.text, 26, 400);
+        t.setText(label);
+        t.setGravity(Gravity.CENTER);
         GradientDrawable g = new GradientDrawable();
-        g.setColor(selected ? th.accent : th.bg);
-        g.setCornerRadius(14 * dp);
+        g.setShape(GradientDrawable.OVAL);
+        g.setColor(Ui.fill(th));
         t.setBackground(g);
         t.setOnClickListener(l);
         return t;
+    }
+
+    private View swatch(int color, View.OnClickListener l) {
+        View dot = new View(ctx);
+        GradientDrawable g = new GradientDrawable();
+        g.setShape(GradientDrawable.OVAL);
+        g.setColor(color);
+        g.setStroke(Math.max(1, (int) dp), th.line);
+        dot.setBackground(g);
+        dot.setOnClickListener(v -> {
+            v.performHapticFeedback(HapticFeedbackConstants.VIRTUAL_KEY);
+            l.onClick(v);
+        });
+        return dot;
+    }
+
+    private LinearLayout.LayoutParams swatchLp() {
+        LinearLayout.LayoutParams l = new LinearLayout.LayoutParams(px(38), px(38));
+        l.rightMargin = px(10);
+        return l;
     }
 
     private LinearLayout row() {

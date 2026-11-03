@@ -29,12 +29,18 @@ class Pc:
             raise ProviderError("странный ответ агента")
 
     def poll(self):
-        """{"online", "name", "macros", "stats", "mac"}; never raises."""
+        """{"online", "name", "macros", "stats", "mac", "calls"}; never raises."""
         try:
             info = self._req("GET", "/api/info")
             stats = self._req("GET", "/api/stats")
+            calls = 0
+            if "calls" in str(info.get("features", "")):
+                try:
+                    calls = len(self._req("GET", "/api/calls").get("calls") or [])
+                except ProviderError:
+                    pass
             return {"online": True, "name": info.get("name") or self.cfg.get("name", ""),
-                    "macros": info.get("macros") or [], "stats": stats, "mac": info.get("mac") or ""}
+                    "macros": info.get("macros") or [], "stats": stats, "mac": info.get("mac") or "", "calls": calls}
         except ProviderError as e:
             return {"online": False, "error": str(e)}
 

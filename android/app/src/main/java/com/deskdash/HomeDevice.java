@@ -81,6 +81,14 @@ final class HomeDevice {
     private static final java.util.regex.Pattern DEG = java.util.regex.Pattern.compile("(-?\\d+(?:[.,]\\d+)?)\\s*°");
     private static final java.util.regex.Pattern PCT = java.util.regex.Pattern.compile("(\\d+(?:[.,]\\d+)?)\\s*%");
 
+    private static final java.util.regex.Pattern OUTSIDE =
+            java.util.regex.Pattern.compile("улиц|снаруж|балкон|двор|outdoor|outside|street|погод");
+
+    /** A sensor outside by its name ("Улица", "Балкон"…): not counted in the temperature at home. */
+    boolean outdoor() {
+        return OUTSIDE.matcher(name.toLowerCase(new java.util.Locale("ru"))).find();
+    }
+
     /** Temperature a sensor or a thermostat reports, NaN when it reports none. */
     double temperature() {
         if (!Double.isNaN(current)) return current;

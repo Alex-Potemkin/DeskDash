@@ -94,6 +94,14 @@ public class DeskEditorActivity extends Activity {
 
     private void render() {
         root.removeAllViews();
+        // "‹ Назад" and the large title, as in the settings
+        TextView back = text("‹ Назад", 17, ACCENT);
+        back.setPadding(0, px(10), px(16), px(8));
+        back.setOnClickListener(v -> finish());
+        root.addView(back, new LinearLayout.LayoutParams(-2, -2));
+        TextView big = text("Столы и блоки", 34, TEXT);
+        big.setTypeface(Ui.font(700));
+        root.addView(big, lp(0, 4));
         section("Столы");
         LinearLayout tabs = row();
         for (int i = 0; i < desks.length(); i++) {
