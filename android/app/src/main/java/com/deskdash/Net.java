@@ -57,8 +57,11 @@ final class Net {
                 throw new HttpError(code, t.length() > 120 ? t.substring(0, 120) + "…" : t);
             }
             return text;
-        } finally {
+        } catch (IOException | RuntimeException e) {
+            // only a broken connection is dropped: a good one goes back to the pool, so the next command to the
+            // same server skips the TCP and TLS handshakes (a few hundred ms to Yandex's cloud)
             c.disconnect();
+            throw e;
         }
     }
 
@@ -95,8 +98,9 @@ final class Net {
                 while ((n = in.read(buf)) > 0) b.write(buf, 0, n);
                 return b.toString(StandardCharsets.UTF_8.name());
             }
-        } finally {
+        } catch (IOException | RuntimeException e) {
             c.disconnect();
+            throw e;
         }
     }
 }

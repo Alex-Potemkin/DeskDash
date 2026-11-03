@@ -45,7 +45,7 @@ CONFIG_PATH = os.path.join(DATA_DIR, "config.json")
 HUB_DISCOVERY_PORT = 8767
 
 HA_EVERY, YA_EVERY, PC_EVERY, SYS_EVERY = 3, 15, 10, 30
-HOLD_S = 4
+HOLD_S = 10  # a changed device keeps its new state until a poll shows it, but no longer than this
 
 
 def log(msg):
@@ -101,7 +101,7 @@ class Hub:
         self.changed = threading.Condition(self.lock)
         self.version = 0
         self.devices = {}        # id -> device dict from HA / Yandex
-        self.holds = {}          # id -> time until which a local change wins over polls
+        self.holds = {}          # id -> (time until which a local change wins over polls, the change)
         self.pcs = {}            # pc id -> poll result
         self.system = {}
         self.errors = {}
@@ -134,21 +134,25 @@ class Hub:
     # polling
 
     def loop(self):
-        last = {"pc": 0, "sys": 0}
+        threading.Thread(target=self._machines_loop, daemon=True).start()
+        while True:
+            self.kick.clear()
+            self._poll_home(time.time())
+            self.kick.wait(HA_EVERY)
+
+    def _machines_loop(self):
+        """Computers and the NAS on their own thread: a sleeping PC's timeout mustn't hold up the lights."""
+        last_sys = 0
         while True:
             now = time.time()
-            self._poll_home(now)
-            if now - last["pc"] >= PC_EVERY:
-                last["pc"] = now
-                self._poll_pcs()
-            if now - last["sys"] >= SYS_EVERY:
-                last["sys"] = now
+            self._poll_pcs()
+            if now - last_sys >= SYS_EVERY:
+                last_sys = now
                 s = machines.system(config()["nas"].get("paths") or [])
                 with self.lock:
                     self.system = s
                 self.bump()
-            self.kick.wait(HA_EVERY)
-            self.kick.clear()
+            time.sleep(max(1, PC_EVERY - (time.time() - now)))
 
     def _poll_home(self, now):
         fresh, errors = {}, {}
@@ -168,11 +172,11 @@ class Hub:
             changed = False
             for src, lst in fresh.items():
                 new = {d["id"]: d for d in lst}
-                for k, until in list(self.holds.items()):
-                    if k in new and now < until and k in self.devices:
+                for k, (until, local) in list(self.holds.items()):
+                    if now >= until or (k in new and shows(new[k], local)):
+                        self.holds.pop(k)  # over, or the service has caught up
+                    elif k in new and k in self.devices:
                         new[k] = self.devices[k]
-                    elif now >= until:
-                        self.holds.pop(k)
                 old = {k: v for k, v in self.devices.items() if v["source"] == src}
                 if old != new:
                     changed = True
@@ -286,11 +290,27 @@ class Hub:
             with self.lock:
                 if did in self.devices:
                     self.devices[did] = {**self.devices[did], **local}
-                    self.holds[did] = time.time() + HOLD_S
+                    self.holds[did] = (time.time() + HOLD_S, local)
             self.bump()
         if d["source"] == "ya":
             self.ya_at = 0
-        threading.Timer(1.5, self.kick.set).start()
+        # read the real state back: Home Assistant has it at once, Yandex's cloud a second later
+        threading.Timer(1.5 if d["source"] == "ya" else 0.3, self.kick.set).start()
+
+
+def shows(d, local):
+    """The polled device already is as the local change made it (brightness and kelvins rounded by the service)."""
+    for k, v in local.items():
+        have = d.get(k)
+        if k == "brightness" or k == "tempK":
+            if have is None or abs(have - v) > (2 if k == "brightness" else 60):
+                return False
+        elif k == "target":
+            if have is None or abs(have - v) >= 0.05:
+                return False
+        elif have != v:
+            return False
+    return True
 
 
 def update_config_quiet(fn):
@@ -441,6 +461,7 @@ def token_of(t):
 class Handler(BaseHTTPRequestHandler):
     server_version = "DeskDashHub/" + VERSION
     protocol_version = "HTTP/1.1"
+    timeout = 120  # dashboards keep their connection open between commands; let go of ones that went quiet
 
     def log_message(self, fmt, *args):
         pass

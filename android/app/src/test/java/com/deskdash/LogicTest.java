@@ -224,4 +224,24 @@ public class LogicTest {
         assertEquals(List.of("on:ha:light.kitchen", "off:ha:light.desk", "timer:600000", "timer:30000", "run:ha:scene.movie",
                 "mode:работа", "brightness:ha:light.desk:40", "media:next", "alloff"), h.done);
     }
+
+    @Test
+    public void tappedTileWaitsForTheServiceToCatchUp() {
+        HomeDevice lamp = new HomeDevice();
+        lamp.on = false;
+        lamp.brightness = 40;
+        SmartHome.Change on = x -> x.on = true;
+        assertFalse(SmartHome.shows(lamp, on));
+        lamp.on = true;
+        assertTrue(SmartHome.shows(lamp, on));
+        // Home Assistant keeps brightness as 0..255: 60 % comes back as 59 %
+        SmartHome.Change dim = x -> {
+            x.brightness = 60;
+            x.on = true;
+        };
+        lamp.brightness = 59;
+        assertTrue(SmartHome.shows(lamp, dim));
+        lamp.brightness = 40;
+        assertFalse(SmartHome.shows(lamp, dim));
+    }
 }

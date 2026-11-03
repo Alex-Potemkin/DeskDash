@@ -17,12 +17,14 @@ final class SmartHome {
         void apply(HomeDevice d);
     }
 
-    private static final long YANDEX_EVERY_MS = 15_000, HOLD_MS = 4000;
+    /** A tapped tile keeps its new look until a poll confirms it, but no longer than HOLD_MS. */
+    private static final long YANDEX_EVERY_MS = 15_000, HOLD_MS = 10_000;
 
     private final Prefs prefs;
     private final Object lock = new Object();
     private volatile Map<String, HomeDevice> devices = Collections.emptyMap();
     private final Map<String, Long> holds = new HashMap<>();
+    private final Map<String, Change> expected = new HashMap<>();
     private List<HomeDevice> yaCache = new ArrayList<>();
     private long yaAt;
     private volatile String haError, yaError, hubError;
@@ -52,6 +54,7 @@ final class SmartHome {
         synchronized (lock) {
             devices = Collections.emptyMap();
             holds.clear();
+            expected.clear();
             yaCache = new ArrayList<>();
             yaAt = 0;
             haError = null;
@@ -99,37 +102,60 @@ final class SmartHome {
             }
             if (ya != null) yaCache = ya;
             if (yaOn) for (HomeDevice d : yaCache) next.put(d.id, d);
-            now = System.currentTimeMillis();
             for (HomeDevice d : Bambu.devices()) next.put(d.id, d);
-            for (Map.Entry<String, Long> h : new ArrayList<>(holds.entrySet())) {
-                if (now < h.getValue() && old.containsKey(h.getKey())) next.put(h.getKey(), old.get(h.getKey()));
-                else holds.remove(h.getKey());
-            }
+            keepHeld(old, next);
             devices = next;
         }
     }
 
     private void pollHub() {
-        List<HomeDevice> l;
         try {
-            l = new HubClient(prefs).devices();
-            hubError = null;
+            applyHub(new HubClient(prefs).devices());
         } catch (Exception e) {
-            hubError = msg(e);
-            l = new ArrayList<>();
+            List<HomeDevice> l = new ArrayList<>();
             for (HomeDevice d : devices.values()) if (!"bambu".equals(d.source)) l.add(d);
+            applyHub(l);
+            hubError = msg(e);
         }
+    }
+
+    /** Devices from the hub, polled or pushed by its live stream. */
+    void applyHub(List<HomeDevice> l) {
+        hubError = null;
         synchronized (lock) {
             Map<String, HomeDevice> old = devices, next = new LinkedHashMap<>();
             for (HomeDevice d : l) next.put(d.id, d);
             for (HomeDevice d : Bambu.devices()) next.put(d.id, d);
-            long now = System.currentTimeMillis();
-            for (Map.Entry<String, Long> h : new ArrayList<>(holds.entrySet())) {
-                if (now < h.getValue() && old.containsKey(h.getKey()) && next.containsKey(h.getKey())) next.put(h.getKey(), old.get(h.getKey()));
-                else holds.remove(h.getKey());
-            }
+            keepHeld(old, next);
             devices = next;
         }
+    }
+
+    /**
+     * Tapped tiles keep their new look against polls that don't show the change yet (Yandex's cloud takes a
+     * second or two), so a lamp doesn't flick back and forth; a poll that shows it ends the hold early.
+     */
+    private void keepHeld(Map<String, HomeDevice> old, Map<String, HomeDevice> next) {
+        long now = System.currentTimeMillis();
+        for (Map.Entry<String, Long> h : new ArrayList<>(holds.entrySet())) {
+            String id = h.getKey();
+            HomeDevice fresh = next.get(id);
+            if (now < h.getValue() && old.containsKey(id) && fresh != null && !shows(fresh, expected.get(id))) {
+                next.put(id, old.get(id));
+            } else {
+                holds.remove(id);
+                expected.remove(id);
+            }
+        }
+    }
+
+    /** The device already is as the change makes it (with the rounding services do to brightness and kelvins). */
+    static boolean shows(HomeDevice d, Change change) {
+        if (change == null) return false;
+        HomeDevice x = d.copy();
+        change.apply(x);
+        return x.on == d.on && Math.abs(x.brightness - d.brightness) <= 2 && Math.abs(x.tempK - d.tempK) <= 60
+                && (Double.isNaN(x.target) ? Double.isNaN(d.target) : Math.abs(x.target - d.target) < 0.05);
     }
 
     /** Changes a device locally right away and keeps that state for a few seconds against stale polls. */
@@ -142,6 +168,7 @@ final class SmartHome {
             change.apply(c);
             next.put(id, c);
             holds.put(id, System.currentTimeMillis() + HOLD_MS);
+            expected.put(id, change);
             devices = next;
         }
     }
@@ -150,6 +177,7 @@ final class SmartHome {
     void release(String id) {
         synchronized (lock) {
             holds.remove(id);
+            expected.remove(id);
         }
         if (id.startsWith("ya")) yaAt = 0;
     }

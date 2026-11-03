@@ -5,14 +5,13 @@ so the phone, the dashboard and the web page all show one list.
 """
 import colorsys
 import datetime
+import http.client as httpc
 import json
 import math
 import re
 import threading
 import time
-import urllib.error
 import urllib.parse
-import urllib.request
 
 SWITCH, LIGHT, CLIMATE, SENSOR, SCENE, COVER, LOCK, FAN, MEDIA, PRINTER, VACUUM, CAMERA, APPLIANCE = range(13)
 
@@ -24,7 +23,15 @@ class ProviderError(Exception):
     pass
 
 
-def http(method, url, auth=None, body=None, content_type="application/json", timeout=8):
+# Idle keep-alive connections by (scheme, host): a command reuses one and skips the TCP and TLS handshakes,
+# a few hundred ms to Yandex's cloud on a Raspberry Pi
+_idle = {}
+_idle_lock = threading.Lock()
+_STALE = (httpc.RemoteDisconnected, httpc.BadStatusLine, ConnectionResetError, BrokenPipeError,
+          ConnectionAbortedError)
+
+
+def http(method, url, auth=None, body=None, content_type="application/json", timeout=8, _redirects=3):
     data = None
     headers = {}
     if auth:
@@ -32,17 +39,45 @@ def http(method, url, auth=None, body=None, content_type="application/json", tim
     if body is not None:
         data = body if isinstance(body, bytes) else (body if isinstance(body, str) else json.dumps(body)).encode("utf-8")
         headers["Content-Type"] = content_type
-    req = urllib.request.Request(url, data=data, headers=headers, method=method)
-    try:
-        with urllib.request.urlopen(req, timeout=timeout) as r:
-            return r.read().decode("utf-8")
-    except urllib.error.HTTPError as e:
-        text = " ".join(e.read().decode("utf-8", "replace").split())
-        raise HttpError(e.code, text[:120]) from None
-    except urllib.error.URLError as e:
-        raise ProviderError(friendly(e.reason)) from None
-    except (TimeoutError, OSError) as e:
-        raise ProviderError(friendly(e)) from None
+    u = urllib.parse.urlsplit(url)
+    if u.scheme not in ("http", "https") or not u.hostname:
+        raise ProviderError(f"неверный адрес {url}")
+    key = (u.scheme, u.netloc)
+    path = (u.path or "/") + ("?" + u.query if u.query else "")
+    for attempt in (0, 1):
+        with _idle_lock:
+            pool = _idle.get(key) or []
+            conn = pool.pop() if pool else None
+        reused = conn is not None
+        if conn is None:
+            cls = httpc.HTTPSConnection if u.scheme == "https" else httpc.HTTPConnection
+            conn = cls(u.hostname, u.port, timeout=timeout)
+        elif conn.sock is not None:
+            conn.sock.settimeout(timeout)
+        try:
+            conn.request(method, path, body=data, headers=headers)
+            r = conn.getresponse()
+            text = r.read().decode("utf-8", "replace")
+        except _STALE as e:
+            conn.close()
+            if reused and attempt == 0:
+                continue  # the server dropped the idle connection before reading the request: send it again
+            raise ProviderError(friendly(e)) from None
+        except (TimeoutError, OSError, httpc.HTTPException) as e:
+            conn.close()
+            raise ProviderError(friendly(e)) from None
+        if r.will_close:
+            conn.close()
+        else:
+            with _idle_lock:
+                _idle.setdefault(key, []).append(conn)
+        if r.status in (301, 302, 303, 307, 308) and r.getheader("Location") and _redirects:
+            to = urllib.parse.urljoin(url, r.getheader("Location"))
+            keep = method if r.status in (307, 308) else "GET"
+            return http(keep, to, auth, body if keep == method else None, content_type, timeout, _redirects - 1)
+        if r.status // 100 != 2:
+            raise HttpError(r.status, " ".join(text.split())[:120])
+        return text
 
 
 class HttpError(ProviderError):

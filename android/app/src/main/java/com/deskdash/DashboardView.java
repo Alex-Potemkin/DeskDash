@@ -119,6 +119,8 @@ public class DashboardView extends FrameLayout {
     private final Host host;
     private final Handler ui = new Handler(Looper.getMainLooper());
     private final ExecutorService io = Executors.newFixedThreadPool(3);
+    /** Smart home only: a tap never waits behind a slow weather download or a camera picture on io. */
+    private final ExecutorService homeIo = Executors.newCachedThreadPool();
     private final AtomicBoolean polling = new AtomicBoolean();
     private final Random rnd = new Random();
     private final float dp;
@@ -198,6 +200,7 @@ public class DashboardView extends FrameLayout {
 
     // smart home
     private final SmartHome home;
+    private final HubStream hubStream;
     private final AtomicBoolean homeBusy = new AtomicBoolean();
     private final List<HomePanel> homePanels = new ArrayList<>();
     private FrameLayout sheet;
@@ -298,6 +301,10 @@ public class DashboardView extends FrameLayout {
         dp = getResources().getDisplayMetrics().density;
         audio = c.getSystemService(AudioManager.class);
         home = new SmartHome(prefs);
+        hubStream = new HubStream(prefs, list -> {
+            home.applyHub(list);
+            ui.post(this::renderHome);
+        });
         weather = Weather.cached(prefs);
         loadMacroCache();
         music =new MusicWatcher(c, new MusicWatcher.Listener() {
@@ -348,6 +355,7 @@ public class DashboardView extends FrameLayout {
         ui.post(secondTick);
         ui.post(pcPoll);
         ui.post(homePoll);
+        if (HubClient.configured(prefs)) hubStream.start();
         ui.post(weatherPoll);
         startLightSensor();
         io.execute(this::saveToHub);
@@ -376,6 +384,7 @@ public class DashboardView extends FrameLayout {
         ui.removeCallbacks(secondTick);
         ui.removeCallbacks(pcPoll);
         ui.removeCallbacks(homePoll);
+        hubStream.stop();
         ui.removeCallbacks(weatherPoll);
         ui.removeCallbacks(reloadCal);
         stopLightSensor();
@@ -396,6 +405,7 @@ public class DashboardView extends FrameLayout {
         voice.stop();
         if (tts != null) tts.shutdown();
         io.shutdownNow();
+        homeIo.shutdownNow();
     }
 
     /** Re-reads settings and rebuilds the UI (theme, fonts, layout). */
@@ -2963,7 +2973,7 @@ public class DashboardView extends FrameLayout {
         @Override
         public void run() {
             if (!running) return;
-            pollHome(false);
+            if (!hubStream.live()) pollHome(false); // the hub pushes its changes itself
             ui.postDelayed(this, 5000);
         }
     };
@@ -2972,7 +2982,7 @@ public class DashboardView extends FrameLayout {
         boolean auto = !prefs.autoCall().isEmpty() || !prefs.autoNight().isEmpty() || !prefs.autoDawn().isEmpty();
         boolean wx = !weatherPanels.isEmpty() || weatherLine != null || aodInfo != null || !energyPanels.isEmpty();
         if (homePanels.isEmpty() && !prefs.live() && !auto && !wx || !SmartHome.configured(prefs) || !homeBusy.compareAndSet(false, true)) return;
-        io.execute(() -> {
+        homeIo.execute(() -> {
             try {
                 home.poll(forceYandex);
             } finally {
@@ -3014,12 +3024,15 @@ public class DashboardView extends FrameLayout {
             home.local(d.id, optimistic);
             renderHome();
         }
-        io.execute(() -> {
+        homeIo.execute(() -> {
             String err = call.run();
             ui.post(() -> {
                 if (err != null) Toast.makeText(ctx, err, Toast.LENGTH_LONG).show();
+                // the hub's stream brings the result by itself; otherwise read it back: Home Assistant
+                // has it at once, Yandex's cloud a second later
+                if (err == null && hubStream.live()) return;
                 ui.removeCallbacks(homeRecheck);
-                ui.postDelayed(homeRecheck, err == null ? 1500 : 100);
+                ui.postDelayed(homeRecheck, err != null ? 100 : "ya".equals(d.source) ? 1500 : 400);
             });
         });
     }
