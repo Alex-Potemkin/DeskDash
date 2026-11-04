@@ -1,0 +1,9 @@
+#!/bin/bash
+# Updates Home Assistant to the latest release: sudo ha-update
+set -e
+PLATFORM=
+[ "$(dpkg --print-architecture)" = armhf ] && PLATFORM="--platform linux/arm64"
+docker pull $PLATFORM ghcr.io/home-assistant/home-assistant:stable
+systemctl restart homeassistant
+docker image prune -f >/dev/null
+echo "Home Assistant обновлён и перезапускается (около минуты)."

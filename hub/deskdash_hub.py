@@ -25,9 +25,10 @@ import threading
 import time
 import uuid
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
-from urllib.parse import parse_qs, unquote, urlparse
+from urllib.parse import parse_qs, quote, unquote, urlparse
 
 import automations
+import files
 import machines
 import providers
 from providers import SCENE, SWITCH, ProviderError
@@ -430,8 +431,15 @@ def profiles():
 
 
 def photos_dir():
+    """The folder set in the settings, or else a photo folder at the top of a NAS disk."""
     d = (config().get("photos") or {}).get("path") or ""
-    return d if d and os.path.isdir(d) else None
+    if d:
+        return d if os.path.isdir(d) else None
+    for disk in machines.nas_paths(config()["nas"].get("paths") or []):
+        for name in ("Фото", "Фотографии", "Photos", "Pictures"):
+            if disk != "/" and os.path.isdir(os.path.join(disk, name)):
+                return os.path.join(disk, name)
+    return None
 
 
 def photo_list():
@@ -550,7 +558,7 @@ class Handler(BaseHTTPRequestHandler):
             return self._static(path)
         if path == "/api/ping":
             return self._send(200, {"ok": True, "app": "deskdash-hub", "name": config()["name"], "version": VERSION})
-        u = self._user(admin=path in ("/api/config", "/api/discover"))
+        u = self._user(admin=path in ("/api/config", "/api/discover", "/api/files", "/api/file"))
         if u is None:
             return
         if path == "/api/me":
@@ -577,6 +585,11 @@ class Handler(BaseHTTPRequestHandler):
             return self._send(200, {"ok": True, "photos": lst[:500]})
         if path == "/api/photo":
             return self._photo(parse_qs(urlparse(self.path).query).get("f", [""])[0])
+        if path == "/api/files":
+            rel = parse_qs(urlparse(self.path).query).get("p", [""])[0]
+            return self._nas(lambda p: {"items": files.listing(p, rel)})
+        if path == "/api/file":
+            return self._file(parse_qs(urlparse(self.path).query))
         self._send(404, {"ok": False, "error": "not found"})
 
     def _photo(self, rel):
@@ -592,10 +605,95 @@ class Handler(BaseHTTPRequestHandler):
         with open(full, "rb") as fh:
             shutil.copyfileobj(fh, self.wfile, 65536)
 
+    # NAS files (administrators only)
+
+    def _nas(self, fn):
+        """Runs a file operation: what goes wrong is a message for the person, not a crash."""
+        try:
+            return self._send(200, {"ok": True, **(fn(config()["nas"].get("paths") or []) or {})})
+        except ValueError as e:
+            return self._send(200, {"ok": False, "error": str(e)})
+        except OSError as e:
+            return self._send(200, {"ok": False, "error": e.strerror or str(e)})
+
+    def _file(self, q):
+        """A file, with ranges so videos can be rewound; ?dl=1 saves it instead of showing it."""
+        try:
+            full = files.resolve(config()["nas"].get("paths") or [], q.get("p", [""])[0])
+        except ValueError as e:
+            return self._send(404, {"ok": False, "error": str(e)})
+        if not full or not os.path.isfile(full):
+            return self._send(404, {"ok": False, "error": "нет такого файла"})
+        size = os.path.getsize(full)
+        mime = mimetypes.guess_type(full)[0] or "application/octet-stream"
+        show = "dl" not in q and (mime in files.INLINE or mime.startswith(("video/", "audio/")))
+        r = files.parse_range(self.headers.get("Range"), size)
+        start, end = r or (0, size - 1)
+        self.send_response(206 if r else 200)
+        self.send_header("Content-Type", mime)
+        self.send_header("Content-Length", str(end - start + 1))
+        self.send_header("Accept-Ranges", "bytes")
+        self.send_header("Content-Disposition", f"{'inline' if show else 'attachment'}; filename*=UTF-8''{quote(os.path.basename(full))}")
+        self.send_header("X-Content-Type-Options", "nosniff")
+        self.send_header("Cache-Control", "private, no-store")
+        if r:
+            self.send_header("Content-Range", f"bytes {start}-{end}/{size}")
+        self.end_headers()
+        try:
+            with open(full, "rb") as fh:
+                fh.seek(start)
+                left = end - start + 1
+                while left > 0:
+                    b = fh.read(min(left, 262144))
+                    if not b:
+                        break
+                    self.wfile.write(b)
+                    left -= len(b)
+        except OSError:
+            self.close_connection = True  # the player jumped elsewhere or the disk went away
+
+    def _upload(self):
+        """POST /api/file?p=<folder>&name=<file> with the file as the body; goes to disk piece by piece."""
+        n = int(self.headers.get("Content-Length") or 0)
+        if self._user(admin=True) is None:
+            self.close_connection = True
+            return
+        q = parse_qs(urlparse(self.path).query)
+        part = None
+        try:
+            folder = files.resolve(config()["nas"].get("paths") or [], q.get("p", [""])[0])
+            if folder is None:
+                raise ValueError("сначала открой диск")
+            name = files.name_ok(q.get("name", [""])[0])
+            to = os.path.join(folder, name)
+            if os.path.exists(to):
+                raise ValueError("такой файл уже есть")
+            if shutil.disk_usage(folder).free < n + (1 << 20):
+                raise ValueError("на диске нет места")
+            part = os.path.join(folder, "." + name + ".part")
+            left = n
+            with open(part, "wb") as fh:
+                while left > 0:
+                    b = self.rfile.read(min(left, 1 << 20))
+                    if not b:
+                        raise OSError("связь оборвалась")
+                    fh.write(b)
+                    left -= len(b)
+            os.replace(part, to)
+            return self._send(200, {"ok": True})
+        except (ValueError, OSError) as e:
+            self.close_connection = True  # what's left of the body can't be read as the next request
+            if part and os.path.exists(part):
+                os.remove(part)
+            msg = str(e) if isinstance(e, ValueError) else e.strerror or str(e)
+            return self._send(200, {"ok": False, "error": msg})
+
     def do_POST(self):
         path = urlparse(self.path).path
+        if path == "/api/file":
+            return self._upload()
         body = self._body()  # read first: with keep-alive an unread body would spoil the next request
-        u = self._user(admin=path.startswith(("/api/config", "/api/tokens", "/api/import", "/api/backup")))
+        u = self._user(admin=path.startswith(("/api/config", "/api/tokens", "/api/import", "/api/backup", "/api/files")))
         if u is None:
             return
         try:
@@ -634,6 +732,12 @@ class Handler(BaseHTTPRequestHandler):
                 return self._send(200, {"ok": True, **public_config()})
             if path == "/api/import":
                 return self._send(200, {"ok": True, "imported": import_from_phone(body)})
+            if path == "/api/files/mkdir":
+                return self._nas(lambda p: files.mkdir(p, body.get("p", ""), body.get("name")))
+            if path == "/api/files/rename":
+                return self._nas(lambda p: files.rename(p, body.get("p", ""), body.get("name")))
+            if path == "/api/files/delete":
+                return self._nas(lambda p: files.delete(p, body.get("p", "")))
             if path == "/api/tokens":
                 name = (body.get("name") or "").strip() or "Телефон"
                 t = {"name": name, "token": secrets.token_urlsafe(12), "admin": bool(body.get("admin"))}

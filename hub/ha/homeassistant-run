@@ -1,0 +1,21 @@
+#!/bin/bash
+# Starts Home Assistant in Docker, in the foreground for systemd (homeassistant.service).
+# On 32-bit Raspberry Pi OS with the Pi's 64-bit kernel it runs the 64-bit image: Home Assistant has no 32-bit
+# build any more. Docker's default system-call filter there only knows 32-bit calls, so it gets the same filter
+# with 64-bit calls allowed (seccomp-arm64.json) instead of none at all.
+set -e
+IMAGE=ghcr.io/home-assistant/home-assistant:stable
+ARGS=(--name homeassistant --network host
+      -e TZ="$(timedatectl show -p Timezone --value)"
+      -v /opt/homeassistant/config:/config
+      -v /run/dbus:/run/dbus:ro
+      --cap-add NET_ADMIN --cap-add NET_RAW)
+if [ "$(dpkg --print-architecture)" = armhf ]; then
+    ARGS+=(--platform linux/arm64 --security-opt seccomp=/etc/docker/seccomp-arm64.json)
+fi
+# Zigbee / Z-Wave sticks plugged in at start: Home Assistant sees them under the same names
+for d in /dev/serial/by-id/* /dev/ttyUSB* /dev/ttyACM*; do
+    [ -e "$d" ] && ARGS+=(--device "$d")
+done
+docker rm -f homeassistant >/dev/null 2>&1 || true
+exec docker run --rm "${ARGS[@]}" "$IMAGE"

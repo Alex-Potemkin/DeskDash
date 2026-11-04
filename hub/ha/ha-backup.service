@@ -1,0 +1,6 @@
+[Unit]
+Description=Copy of Home Assistant settings to the NAS
+
+[Service]
+Type=oneshot
+ExecStart=/usr/local/sbin/ha-backup

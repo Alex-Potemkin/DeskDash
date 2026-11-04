@@ -1,0 +1,77 @@
+#!/bin/bash
+# Mounts a USB disk the moment it is plugged in: /mnt/nas/<its label>, shared over Samba as part of \\pi\nas.
+# Run by deskdash-nas@<sda1>.service, which udev starts for every partition with a file system.
+#
+#   deskdash-nas add sda1       mount
+#   deskdash-nas remove sda1    unmount (the disk was pulled out or the Pi shuts down)
+set -u
+
+ROOT=/mnt/nas
+STATE=/run/deskdash-nas
+USER_NAME=$(cat /etc/deskdash-nas.user 2>/dev/null || echo aslhost)
+ACTION=${1:-}
+DEV=/dev/${2:-}
+KEY=${2:-}
+mkdir -p "$ROOT" "$STATE"
+
+log() { [ -t 1 ] && echo "$*"; logger -t deskdash-nas "$*"; }
+
+if [ "$ACTION" = remove ]; then
+    MNT=$(cat "$STATE/$KEY" 2>/dev/null) || exit 0
+    # lazy: a file still open over Samba doesn't keep the disk busy forever
+    umount "$MNT" 2>/dev/null || umount -l "$MNT"
+    rmdir "$MNT" 2>/dev/null
+    rm -f "$STATE/$KEY"
+    log "$KEY отключён от $MNT"
+    exit 0
+fi
+
+[ "$ACTION" = add ] && [ -b "$DEV" ] || { echo "usage: $0 add|remove sda1"; exit 1; }
+# boot and recovery partitions (Ventoy's VTOYEFI, a disk's EFI part) are not storage: writing there can spoil them
+if [ "$(blockdev --getsize64 "$DEV")" -lt $((1024 * 1024 * 1024)) ]; then
+    log "$KEY: раздел меньше 1 ГБ, это служебный раздел, пропускаю"
+    exit 0
+fi
+FS=$(blkid -o value -s TYPE "$DEV")
+LABEL=$(blkid -o value -s LABEL "$DEV")
+UUID=$(blkid -o value -s UUID "$DEV")
+UID_N=$(id -u "$USER_NAME")
+GID_N=$(id -g "$USER_NAME")
+
+case "$FS" in
+    ntfs)        TYPE=ntfs-3g; OPTS="uid=$UID_N,gid=$GID_N,umask=002,big_writes,windows_names" ;;
+    exfat)       TYPE=exfat;   OPTS="uid=$UID_N,gid=$GID_N,umask=002" ;;
+    vfat)        TYPE=vfat;    OPTS="uid=$UID_N,gid=$GID_N,umask=002,utf8" ;;
+    ext4|ext3|ext2|btrfs|xfs) TYPE=$FS; OPTS="defaults" ;;
+    *) log "$KEY: файловая система «$FS» не поддерживается, пропускаю"; exit 0 ;;
+esac
+OPTS="$OPTS,noatime"
+
+# the folder is the disk's label ("Фильмы"), or Диск-1A2B for a disk without one
+NAME=$(printf '%s' "$LABEL" | tr '/\\:*?"<>|' '_________' | sed 's/^[ .]*//; s/[ .]*$//')
+[ -n "$NAME" ] || NAME="Диск-$(printf '%s' "$UUID" | tr -d '-' | cut -c1-4 | tr a-z A-Z)"
+MNT="$ROOT/$NAME"
+n=2
+while mountpoint -q "$MNT"; do
+    MNT="$ROOT/$NAME-$n"
+    n=$((n + 1))
+done
+mkdir -p "$MNT"
+
+# ext4 after a power cut: replay and fix what is safe to fix automatically
+case "$FS" in ext*) timeout 600 fsck -p "$DEV" >/dev/null 2>&1 ;; esac
+
+if ! mount -t "$TYPE" -o "$OPTS" "$DEV" "$MNT" 2>/tmp/deskdash-nas.err; then
+    # NTFS from a Windows that hibernated ("fast startup") only mounts read-only
+    if [ "$FS" = ntfs ] && mount -t "$TYPE" -o "$OPTS,ro" "$DEV" "$MNT" 2>>/tmp/deskdash-nas.err; then
+        log "$KEY ($LABEL): только чтение — Windows не завершила работу с диском. Отключи в ней «Быстрый запуск»"
+    else
+        log "$KEY ($LABEL): не монтируется: $(tr '\n' ' ' </tmp/deskdash-nas.err)"
+        rmdir "$MNT"
+        exit 1
+    fi
+fi
+# a fresh Linux disk belongs to root: give its top folder to the NAS user so the share can write to it
+case "$FS" in ext*|btrfs|xfs) [ "$(stat -c %u "$MNT")" = 0 ] && chown "$USER_NAME:$USER_NAME" "$MNT" ;; esac
+echo "$MNT" > "$STATE/$KEY"
+log "$KEY ($FS, «$LABEL») подключён: $MNT, $(df -h --output=size "$MNT" | tail -1 | tr -d ' ')"

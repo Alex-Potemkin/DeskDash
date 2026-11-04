@@ -1,0 +1,21 @@
+#!/bin/bash
+# Nightly copy of Home Assistant's settings next to the hub's backups on the biggest NAS disk:
+# <disk>/deskdash-backup/<date>/homeassistant.tgz. The history database stays out (it is big and rebuilds itself);
+# the hub keeps two weeks of these folders.
+set -e
+DISK=$(for d in /mnt/nas/*/; do mountpoint -q "$d" && df -B1 --output=size,target "$d" | tail -1; done | sort -n | tail -1 | sed 's/^ *[0-9]* *//')
+[ -n "$DISK" ] || { echo "нет диска NAS: копия Home Assistant пропущена"; exit 0; }
+USER_NAME=$(cat /etc/deskdash-nas.user 2>/dev/null || echo aslhost)
+DST="$DISK/deskdash-backup/$(date +%F)"
+sudo -u "$USER_NAME" mkdir -p "$DST"
+tar -czf "$DST/homeassistant.tgz" --exclude='config/home-assistant_v2.db*' --exclude='config/*.log*'     --exclude='config/tts' --exclude='config/backups' -C /opt/homeassistant config
+chown "$USER_NAME:" "$DST/homeassistant.tgz" 2>/dev/null || true
+echo "копия Home Assistant: $DST/homeassistant.tgz ($(du -h "$DST/homeassistant.tgz" | cut -f1))"
+
+# the Obsidian vault the Pi keeps in sync (obsidian_setup.sh), without Syncthing's own old versions
+VAULT=$(getent passwd "$USER_NAME" | cut -d: -f6)/Obsidian
+if [ -d "$VAULT" ]; then
+    tar -czf "$DST/obsidian.tgz" --exclude='Obsidian/.stversions' --exclude='Obsidian/.stfolder' -C "$(dirname "$VAULT")" Obsidian
+    chown "$USER_NAME:" "$DST/obsidian.tgz" 2>/dev/null || true
+    echo "копия Obsidian: $DST/obsidian.tgz ($(du -h "$DST/obsidian.tgz" | cut -f1))"
+fi

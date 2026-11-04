@@ -1,0 +1,4 @@
+# DeskDash NAS: every USB partition with a file system is mounted by deskdash-nas@<name>.service under /mnt/nas.
+# The desktop's own automount (udisks) keeps its hands off these disks, or it would mount them a second time.
+SUBSYSTEM=="block", KERNEL=="sd*", ENV{ID_FS_USAGE}=="filesystem", ENV{UDISKS_IGNORE}="1"
+ACTION=="add", SUBSYSTEM=="block", KERNEL=="sd*", ENV{ID_FS_USAGE}=="filesystem", TAG+="systemd", ENV{SYSTEMD_WANTS}+="deskdash-nas@%k.service"

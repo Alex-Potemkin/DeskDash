@@ -1,0 +1,12 @@
+#!/bin/bash
+# Samba's "dfree command": how big the \\pi\nas drive looks in Windows. The share's top folder lives on the Pi's SD card,
+# the disks are mounted inside it, so without this Windows shows the card. At the top: all disks together; in a disk: that disk.
+# Answers "total free blocksize".
+DIR=$(cd "${1:-.}" 2>/dev/null && pwd -P)
+if [ "$DIR" = /mnt/nas ]; then
+    for d in /mnt/nas/*/; do
+        mountpoint -q "$d" && df -k --output=size,avail "$d" | tail -1
+    done | awk '{t += $1; a += $2} END {print t + 0, a + 0, 1024}'
+else
+    df -k --output=size,avail "${1:-.}" | tail -1 | awk '{print $1, $2, 1024}'
+fi

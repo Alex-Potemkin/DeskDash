@@ -102,18 +102,60 @@ def engine_check():
     check(fired.count("Дверь") == 1 and fired.count("Созвон") == 1, "the door opened and a call started")
 
 
+def raw(method, path, data=None, token="admin", headers=None):
+    req = urllib.request.Request(f"http://127.0.0.1:{HUB_PORT}{path}", method=method, data=data,
+                                 headers={"X-Token": token, **(headers or {})})
+    try:
+        with urllib.request.urlopen(req, timeout=5) as r:
+            return r.status, r.read(), r.headers
+    except urllib.error.HTTPError as e:
+        return e.code, e.read(), e.headers
+
+
+def files_check(nas):
+    """NAS files in the web app: only for administrators, only inside the disks."""
+    q = urllib.parse.quote
+    check(call("/api/files")[0] == 403, "files need an admin token")
+    check([i["name"] for i in call("/api/files", token="admin")[1]["items"]] == ["Диск"], "disks are listed")
+    check(call("/api/files/mkdir", {"p": "Диск", "name": "Фильмы"}, token="admin")[1]["ok"], "folder created")
+    body = b"0123456789" * 1000
+    code, r, _ = raw("POST", f"/api/file?p={q('Диск/Фильмы')}&name={q('кино.mp4')}", body)
+    check(code == 200 and json.loads(r)["ok"], "file uploaded")
+    code, r, _ = raw("POST", f"/api/file?p={q('Диск/Фильмы')}&name={q('кино.mp4')}", body)
+    check(not json.loads(r)["ok"], "an upload doesn't overwrite")
+    items = call("/api/files?p=" + q("Диск/Фильмы"), token="admin")[1]["items"]
+    check([(i["name"], i["size"]) for i in items] == [("кино.mp4", 10000)], "no leftovers in the folder")
+    url = "/api/file?p=" + q("Диск/Фильмы/кино.mp4")
+    code, r, h = raw("GET", url, headers={"Range": "bytes=10-19"})
+    check(code == 206 and r == b"0123456789" and h["Content-Range"] == "bytes 10-19/10000", "a video can be rewound")
+    code, r, h = raw("GET", url + "&dl=1")
+    check(code == 200 and len(r) == 10000 and h["Content-Disposition"].startswith("attachment"), "file downloaded")
+    with open(os.path.join(nas, "x.html"), "w") as f:
+        f.write("<script>")
+    check(raw("GET", "/api/file?p=" + q("Диск/x.html"))[2]["Content-Disposition"].startswith("attachment"),
+          "a page on the disk isn't shown as the hub's own")
+    check(raw("GET", "/api/file?p=" + q("Диск/../config.json"))[0] == 404, "no files outside the disk")
+    check(not raw("POST", f"/api/file?p={q('Диск/..')}&name=x", b"x")[1].startswith(b'{"ok": true'), "no uploads outside the disk")
+    check(not call("/api/files/delete", {"p": "Диск"}, token="admin")[1]["ok"], "a disk can't be deleted")
+    check(call("/api/files/rename", {"p": "Диск/Фильмы/кино.mp4", "name": "фильм.mp4"}, token="admin")[1]["ok"], "file renamed")
+    check(call("/api/files/delete", {"p": "Диск/Фильмы"}, token="admin")[1]["ok"]
+          and not os.path.exists(os.path.join(nas, "Фильмы")), "folder deleted")
+
+
 def main():
     engine_check()
     for port in (HA_PORT, AGENT_PORT):
         s = ThreadingHTTPServer(("127.0.0.1", port), Fake)
         threading.Thread(target=s.serve_forever, daemon=True).start()
     data = tempfile.mkdtemp()
+    nas = os.path.join(data, "Диск")
+    os.mkdir(nas)
     with open(os.path.join(data, "config.json"), "w", encoding="utf-8") as f:
         json.dump({"port": HUB_PORT, "tokens": [{"name": "admin", "token": "admin", "admin": True},
                                                 {"name": "user", "token": "user"}],
                    "ha": {"url": f"127.0.0.1:{HA_PORT}", "token": "good"},
                    "pcs": [{"id": "pc", "name": "", "host": "127.0.0.1", "port": AGENT_PORT, "token": "abc"}],
-                   "nas": {"paths": [data]},
+                   "nas": {"paths": [nas]},
                    "scenes": [{"id": "s", "label": "Тест", "steps": [{"device": "ha:switch.kettle", "action": "on"},
                                                                     {"pc": "pc", "macro": "lock"}]}]}, f)
     hub = subprocess.Popen([sys.executable, os.path.join(os.path.dirname(os.path.abspath(__file__)), "deskdash_hub.py")],
@@ -178,6 +220,7 @@ def main():
         code, b = call("/api/backup", {}, token="admin")
         check(code == 200 and b["ok"] and os.path.isfile(os.path.join(b["path"], "config.json"))
               and os.path.isdir(os.path.join(b["path"], "profiles")), "backup to the NAS folder")
+        files_check(nas)
         print("hub smoke test passed")
     finally:
         hub.terminate()

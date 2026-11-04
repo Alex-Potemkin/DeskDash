@@ -1,0 +1,14 @@
+[Unit]
+Description=DeskDash NAS disk %I
+# stops (and unmounts) by itself when the disk is pulled out
+BindsTo=dev-%i.device
+After=dev-%i.device
+Before=smbd.service
+
+[Service]
+Type=oneshot
+RemainAfterExit=yes
+ExecStart=/usr/local/sbin/deskdash-nas add %i
+ExecStop=/usr/local/sbin/deskdash-nas remove %i
+# a check of a big ext4 disk after a power cut takes a while
+TimeoutStartSec=900

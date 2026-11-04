@@ -11,7 +11,7 @@ DATA="$(getent passwd "$USER_NAME" | cut -d: -f6)/.config/deskdash-hub"
 command -v python3 >/dev/null || sudo apt-get install -y python3
 
 sudo mkdir -p "$DEST/web"
-sudo cp "$SRC"/deskdash_hub.py "$SRC"/providers.py "$SRC"/machines.py "$DEST"/
+sudo cp "$SRC"/deskdash_hub.py "$SRC"/providers.py "$SRC"/machines.py "$SRC"/automations.py "$SRC"/files.py "$DEST"/
 sudo cp "$SRC"/web/* "$DEST/web/"
 
 sudo tee /etc/systemd/system/deskdash-hub.service >/dev/null <<EOF

@@ -76,8 +76,8 @@ async function start() {
   }
   $("#login").hidden = true;
   $("#app").hidden = false;
-  $("#tab-settings").hidden = !me.admin;
-  if (tab === "settings" && !me.admin) tab = "home";
+  $("#tab-settings").hidden = $("#tab-files").hidden = !me.admin;
+  if ((tab === "settings" || tab === "files") && !me.admin) tab = "home";
   selectTab(tab);
   connect();
 }
@@ -157,6 +157,10 @@ function selectTab(t) {
 function render() {
   const v = $("#view");
   if (tab === "settings") return renderSettings(v);
+  if (tab === "files") {  // lives on its own: a state update mustn't close the open folder
+    if (!$("#files")) { v.innerHTML = ""; renderFiles(v); }
+    return;
+  }
   if (!state) { v.innerHTML = '<div class="empty">Загрузка…</div>'; return; }
   const list = $("#home-list");
   if (tab === "home" && list) return renderHomeList(list);  // keep the search box and its focus
@@ -428,6 +432,95 @@ function renderNas(v) {
       h("div", { class: "muted small" }, `свободно ${size(d.free)} из ${size(d.total)}`)));
   }
   if (!(s.disks || []).length) v.append(h("div", { class: "card muted" }, "Папки NAS не указаны."));
+}
+
+// ---------------------------------------------------------------- NAS files (admin)
+
+let filesPath = "";
+
+const fileUrl = (p, dl) => `/api/file?p=${encodeURIComponent(p)}&token=${encodeURIComponent(token)}${dl ? "&dl=1" : ""}`;
+
+function renderFiles(v) {
+  const box = h("div", { id: "files" });
+  v.append(box);
+  const join = name => (filesPath ? filesPath + "/" : "") + name;
+  const open = p => { filesPath = p; draw(); };
+  const act = async (path, body, done) => {
+    try { await api(path, body); if (done) toast(done); draw(); } catch (e) { toast(e.message); }
+  };
+
+  const upload = list => {
+    const queue = [...list];
+    const line = h("div", { class: "hint" });
+    box.prepend(line);
+    const next = () => {
+      const f = queue.shift();
+      if (!f) { toast("Загружено"); return draw(); }
+      const x = new XMLHttpRequest();
+      x.open("POST", `/api/file?p=${encodeURIComponent(filesPath)}&name=${encodeURIComponent(f.name)}`);
+      x.setRequestHeader("X-Token", token);
+      x.setRequestHeader("Content-Type", "application/octet-stream");
+      x.upload.onprogress = e => { line.textContent = `${f.name}: ${Math.round(100 * e.loaded / (e.total || 1))} %`; };
+      x.onload = () => {
+        let o = {};
+        try { o = JSON.parse(x.responseText); } catch (e) { /* the message below */ }
+        if (o.ok) return next();
+        toast(`${f.name}: ${o.error || "не загрузился"}`);
+        draw();
+      };
+      x.onerror = () => { toast(`${f.name}: связь оборвалась`); draw(); };
+      x.send(f);
+    };
+    next();
+  };
+
+  const row = it => {
+    const p = join(it.name);
+    const tap = () => it.dir ? open(p) : window.open(fileUrl(p), "_blank");
+    const info = it.disk ? `свободно ${size(it.free)} из ${size(it.total)}` : it.dir ? "" : size(it.size);
+    return h("div", { class: "file" },
+      h("button", { class: "file-open", onclick: tap },
+        h("span", { class: "file-ico" }, it.disk ? "◫" : it.dir ? "▣" : "▤"),
+        h("span", { class: "file-name" }, it.name, info ? h("small", { class: "muted" }, info) : null)),
+      it.disk ? null : h("div", { class: "file-btns" },
+        it.dir ? null : h("a", { class: "chip", href: fileUrl(p, true), download: it.name, title: "Скачать" }, "↓"),
+        h("button", { class: "chip", title: "Переименовать", onclick: () => {
+          const name = prompt("Новое имя", it.name);
+          if (name && name !== it.name) act("/api/files/rename", { p, name });
+        } }, "✎"),
+        h("button", { class: "chip", title: "Удалить", onclick: () => {
+          if (confirm(`Удалить «${it.name}» навсегда?` + (it.dir ? " Вместе со всем, что внутри." : ""))) act("/api/files/delete", { p }, "Удалено");
+        } }, "✕")));
+  };
+
+  async function draw() {
+    box.innerHTML = "";
+    const parts = filesPath ? filesPath.split("/") : [];
+    const crumbs = h("div", { class: "chips" }, h("button", { class: "chip" + (parts.length ? "" : " sel"), onclick: () => open("") }, "Диски"),
+      parts.map((n, i) => h("button", { class: "chip" + (i === parts.length - 1 ? " sel" : ""), onclick: () => open(parts.slice(0, i + 1).join("/")) }, n)));
+    box.append(h("h2", {}, "Файлы"), crumbs);
+    if (parts.length) {
+      const pick = h("input", { type: "file", multiple: true, hidden: true, onchange: e => upload(e.target.files) });
+      box.append(pick, h("div", { class: "btns" },
+        h("button", { class: "ghost", onclick: () => pick.click() }, "Загрузить"),
+        h("button", { class: "ghost", onclick: () => {
+          const name = prompt("Имя папки");
+          if (name) act("/api/files/mkdir", { p: filesPath, name });
+        } }, "Новая папка")));
+    }
+    const list = h("div", { class: "card", style: "margin-top:12px;padding:6px 10px" }, "Загрузка…");
+    box.append(list);
+    try {
+      const { items } = await api("/api/files?p=" + encodeURIComponent(filesPath));
+      list.innerHTML = "";
+      if (!items.length) list.append(h("div", { class: "empty" }, parts.length ? "Папка пуста" : "Диски не подключены. Вставь USB-диск в Pi."));
+      list.append(...items.map(row));
+    } catch (e) {
+      list.textContent = e.message;
+      if (parts.length) filesPath = "";
+    }
+  }
+  draw();
 }
 
 // ---------------------------------------------------------------- settings (admin)

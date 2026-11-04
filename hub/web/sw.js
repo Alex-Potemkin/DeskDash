@@ -1,5 +1,5 @@
 // Keeps the app shell so the icon opens instantly; data always comes live from the hub.
-const CACHE = "deskdash-hub-v2";
+const CACHE = "deskdash-hub-v3";
 const SHELL = ["/", "/app.js", "/app.css", "/icon.svg", "/manifest.webmanifest"];
 
 self.addEventListener("install", e => e.waitUntil(caches.open(CACHE).then(c => c.addAll(SHELL)).then(() => self.skipWaiting())));

@@ -1,0 +1,15 @@
+[Unit]
+Description=Home Assistant (Docker)
+After=docker.service network-online.target
+Requires=docker.service
+Wants=network-online.target
+
+[Service]
+ExecStart=/usr/local/sbin/homeassistant-run
+ExecStop=/usr/bin/docker stop -t 30 homeassistant
+Restart=always
+RestartSec=10
+TimeoutStartSec=0
+
+[Install]
+WantedBy=multi-user.target

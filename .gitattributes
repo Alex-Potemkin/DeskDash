@@ -6,3 +6,6 @@ linux/install.sh text eol=lf
 *.yml text eol=lf
 hub/install.sh text eol=lf
 hub/nas_setup.sh text eol=lf
+hub/*.sh text eol=lf
+hub/nas/* text eol=lf
+hub/ha/* text eol=lf

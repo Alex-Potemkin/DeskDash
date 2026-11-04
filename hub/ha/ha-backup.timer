@@ -1,0 +1,10 @@
+[Unit]
+Description=Nightly copy of Home Assistant settings to the NAS
+
+[Timer]
+# after the hub's own backup at 3:30, into the same dated folder
+OnCalendar=*-*-* 03:45
+Persistent=true
+
+[Install]
+WantedBy=timers.target

@@ -107,6 +107,22 @@ def _cpu_times():
 _prev_cpu = [None]
 
 
+def nas_paths(paths):
+    """The configured disk folders; "/mnt/nas/*" stands for every disk mounted there right now (they come and go)."""
+    out = []
+    for p in paths:
+        p = p.get("path") if isinstance(p, dict) else p
+        if p and p.endswith("/*"):
+            base = p[:-2]
+            try:
+                out += sorted(os.path.join(base, d) for d in os.listdir(base) if os.path.ismount(os.path.join(base, d)))
+            except OSError:
+                pass
+        elif p:
+            out.append(p)
+    return out
+
+
 def system(paths):
     """CPU, temperature, memory, uptime and free space of the NAS disks. Works on Linux; elsewhere what it can."""
     out = {"host": socket.gethostname(), "disks": []}
@@ -128,8 +144,7 @@ def system(paths):
     up = _read("/proc/uptime").split()
     if up:
         out["uptime"] = int(float(up[0]))
-    for p in paths:
-        p = p.get("path") if isinstance(p, dict) else p
+    for p in nas_paths(paths):
         try:
             u = shutil.disk_usage(p)
             out["disks"].append({"path": p, "name": os.path.basename(p.rstrip("/")) or p,

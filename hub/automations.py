@@ -18,6 +18,8 @@ import shutil
 import threading
 import time
 
+import machines
+
 TICK_S = 20
 LATE_S = 300  # a missed moment (the Pi was busy or restarting) still fires within five minutes
 BACKUP_AT, BACKUP_KEEP = "03:30", 14
@@ -153,10 +155,9 @@ class Engine:
         cfg = self.config()
         if cfg.get("backup_dir"):
             return cfg["backup_dir"]
-        for p in (cfg.get("nas") or {}).get("paths") or []:
-            if p and p != "/" and os.path.isdir(p):
-                return os.path.join(p, "deskdash-backup")
-        return None
+        # the biggest disk: it stays the same night after night, whatever else gets plugged in
+        disks = [p for p in machines.nas_paths((cfg.get("nas") or {}).get("paths") or []) if p != "/" and os.path.isdir(p)]
+        return os.path.join(max(disks, key=lambda p: shutil.disk_usage(p).total), "deskdash-backup") if disks else None
 
     def _backup(self, now):
         day = now.strftime("%Y-%m-%d")

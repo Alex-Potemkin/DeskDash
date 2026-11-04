@@ -1,64 +1,46 @@
 #!/bin/bash
-# NAS on the Raspberry Pi: mounts an external disk at /mnt/nas on every boot, shares it over Samba
-# and shows it on the hub's "Сервер" tab. Run once with sudo; running it again changes nothing.
+# NAS on the Raspberry Pi: after this, any USB disk plugged in mounts by itself at /mnt/nas/<its label>,
+# shows up in the \\<pi>\nas network folder and on the hub's "Сервер" tab; pulled out, it is unmounted cleanly.
+# NTFS, exFAT, FAT and ext4 disks all work as they are, nothing gets formatted. Run once with sudo; again to update.
 #
-#   sudo bash nas_setup.sh                 the first NTFS/ext4/exFAT partition on a USB disk
-#   sudo bash nas_setup.sh /dev/sda1       a specific partition
+#   sudo bash nas_setup.sh
 set -e
 
 [ "$(id -u)" = 0 ] || { echo "Запусти через sudo: sudo bash $0"; exit 1; }
+SRC="$(cd "$(dirname "$0")" && pwd)"
 USER_NAME="${SUDO_USER:-aslhost}"
-UID_N=$(id -u "$USER_NAME")
-GID_N=$(id -g "$USER_NAME")
-MNT=/mnt/nas
-SHARE=nas
-
-DEV="$1"
-if [ -z "$DEV" ]; then
-    DEV=$(lsblk -nrpo NAME,FSTYPE | awk '$2 ~ /^(ntfs|ext4|exfat)$/ && $1 !~ /mmcblk|loop|zram/ {print $1}' | head -1)
-fi
-[ -b "$DEV" ] || { echo "Диск не найден. Укажи раздел: sudo bash $0 /dev/sda1"; lsblk; exit 1; }
-FS=$(lsblk -no FSTYPE "$DEV")
-UUID=$(lsblk -no UUID "$DEV")
-LABEL=$(lsblk -no LABEL "$DEV")
-echo "Диск: $DEV  «$LABEL»  $FS  UUID=$UUID"
+[ "$USER_NAME" = root ] && USER_NAME=aslhost
 
 echo "== Пакеты"
-PKGS="samba"
-[ "$FS" = ntfs ] && PKGS="$PKGS ntfs-3g"
-[ "$FS" = exfat ] && PKGS="$PKGS exfatprogs"
 apt-get update -qq
-DEBIAN_FRONTEND=noninteractive apt-get install -y -qq $PKGS >/dev/null
+# wsdd: the Pi shows up in Windows Explorer's "Network"
+DEBIAN_FRONTEND=noninteractive apt-get install -y -qq samba ntfs-3g exfatprogs wsdd >/dev/null
 
-echo "== Монтирование в $MNT"
-mkdir -p "$MNT"
-case "$FS" in
-    # ntfs-3g, not the kernel ntfs3 driver: it also mounts a disk that Windows didn't shut down cleanly
-    ntfs)  OPTS="uid=$UID_N,gid=$GID_N,umask=002,big_writes"; TYPE=ntfs-3g ;;
-    exfat) OPTS="uid=$UID_N,gid=$GID_N,umask=002"; TYPE=exfat ;;
-    *)     OPTS="defaults"; TYPE=ext4 ;;
-esac
-# nofail: the Pi still boots when the disk is unplugged
-LINE="UUID=$UUID $MNT $TYPE $OPTS,nofail,x-systemd.device-timeout=15s 0 0"
-if grep -q " $MNT " /etc/fstab; then
-    sed -i "\| $MNT |c\\$LINE" /etc/fstab
-else
-    cp /etc/fstab /etc/fstab.bak-deskdash
-    echo "$LINE" >> /etc/fstab
+echo "== Диски подключаются сами"
+echo "$USER_NAME" > /etc/deskdash-nas.user
+install -m 755 "$SRC/nas/deskdash-nas" "$SRC/nas/deskdash-nas-dfree" /usr/local/sbin/
+install -m 644 "$SRC/nas/deskdash-nas@.service" /etc/systemd/system/
+install -m 644 "$SRC/nas/99-deskdash-nas.rules" /etc/udev/rules.d/
+mkdir -p /mnt/nas
+# root's: the folder itself is on the SD card, so the share can write into the disks but not next to them
+chown root:root /mnt/nas
+# the old one-disk setup put the disk into fstab at /mnt/nas itself: now every disk gets its own folder there
+if grep -q " /mnt/nas " /etc/fstab; then
+    mountpoint -q /mnt/nas && umount /mnt/nas || true
+    sed -i '\| /mnt/nas |d' /etc/fstab
 fi
 systemctl daemon-reload
-mountpoint -q "$MNT" && umount "$MNT"
-mount "$MNT"
-[ "$FS" = ext4 ] && chown "$USER_NAME:$USER_NAME" "$MNT"
-df -h "$MNT" | tail -1
+udevadm control --reload
+# disks that are already plugged in
+udevadm trigger --action=add --subsystem-match=block
 
-echo "== Samba: \\\\$(hostname)\\$SHARE"
-if ! grep -q "^\[$SHARE\]" /etc/samba/smb.conf; then
+echo "== Сетевая папка \\\\$(hostname)\\nas"
+if ! grep -q "^\[nas\]" /etc/samba/smb.conf; then
     cat >> /etc/samba/smb.conf <<EOF
 
-[$SHARE]
-   comment = NAS ($LABEL)
-   path = $MNT
+[nas]
+   comment = DeskDash NAS: все подключённые диски
+   path = /mnt/nas
    valid users = $USER_NAME
    force user = $USER_NAME
    read only = no
@@ -67,34 +49,44 @@ if ! grep -q "^\[$SHARE\]" /etc/samba/smb.conf; then
    directory mask = 0775
 EOF
 fi
+grep -q "deskdash-nas-dfree" /etc/samba/smb.conf \
+    || sed -i '/^\[nas\]/a\   dfree command = /usr/local/sbin/deskdash-nas-dfree' /etc/samba/smb.conf
+# a wrong login is refused, not turned into a guest: Windows can't sign a guest session and shows a meaningless error
+sed -i 's/^\( *map to guest *= *\).*/\1never/I' /etc/samba/smb.conf
 testparm -s >/dev/null 2>&1 || { echo "Ошибка в /etc/samba/smb.conf"; exit 1; }
-if ! pdbedit -L 2>/dev/null | grep -q "^$USER_NAME:"; then
-    echo "Придумай пароль для сетевой папки (пользователь $USER_NAME):"
-    smbpasswd -a "$USER_NAME"
-fi
-systemctl enable --now smbd >/dev/null 2>&1
+systemctl enable --now smbd wsdd >/dev/null 2>&1 || true
 systemctl restart smbd
 if command -v ufw >/dev/null && ufw status | grep -q active; then ufw allow samba >/dev/null; fi
 
-echo "== Хаб: показывать $MNT на вкладке «Сервер»"
+echo "== Wi-Fi без энергосбережения"
+# a server answers at once: with power saving the Pi drops pings and takes 200 ms to wake up
+if [ -d /etc/NetworkManager/conf.d ]; then
+    printf '[connection]\nwifi.powersave = 2\n' > /etc/NetworkManager/conf.d/deskdash-wifi.conf
+    iw dev wlan0 set power_save off 2>/dev/null || true
+fi
+
+echo "== Хаб: диски на вкладке «Сервер», копии на самый большой диск"
 CFG=$(getent passwd "$USER_NAME" | cut -d: -f6)/.config/deskdash-hub/config.json
 if [ -f "$CFG" ]; then
-    sudo -u "$USER_NAME" python3 - "$CFG" "$MNT" <<'EOF'
+    sudo -u "$USER_NAME" python3 - "$CFG" <<'EOF'
 import json, sys
-path, mnt = sys.argv[1], sys.argv[2]
+path = sys.argv[1]
 c = json.load(open(path, encoding="utf-8"))
-paths = c.setdefault("nas", {}).setdefault("paths", ["/"])
-if mnt not in paths:
-    paths.append(mnt)
+paths = [p for p in c.setdefault("nas", {}).get("paths") or ["/"] if p != "/mnt/nas"]
+if "/mnt/nas/*" not in paths:
+    paths.append("/mnt/nas/*")
+c["nas"]["paths"] = paths
 json.dump(c, open(path, "w", encoding="utf-8"), ensure_ascii=False, indent=2)
 EOF
-    sudo -u "$USER_NAME" XDG_RUNTIME_DIR=/run/user/$UID_N systemctl --user restart deskdash-hub 2>/dev/null \
-        || systemctl restart deskdash-hub 2>/dev/null || true
+    systemctl restart deskdash-hub 2>/dev/null || true
 fi
 
 IP=$(hostname -I | awk '{print $1}')
 echo
-echo "Готово."
-echo "  Windows:  \\\\$IP\\$SHARE   (логин $USER_NAME и пароль Samba)"
-echo "  Android:  smb://$IP/$SHARE   (например, в CX Проводник или Solid Explorer)"
-echo "  Диск монтируется сам при включении; если его отключить, Pi всё равно загрузится."
+echo "Готово. Вставь диск — через несколько секунд он в сетевой папке:"
+echo "  Windows:  \\\\$IP\\nas      Android:  smb://$IP/nas"
+if ! pdbedit -L 2>/dev/null | grep -q "^$USER_NAME:"; then
+    echo
+    echo "Остался один шаг: пароль для сетевой папки. Придумай его и введи:"
+    echo "  sudo smbpasswd -a $USER_NAME"
+fi
