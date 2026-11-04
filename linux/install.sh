@@ -30,7 +30,7 @@ else
   python3 -m venv "$SHARE/venv"
   "$SHARE/venv/bin/pip" install --quiet --upgrade pip pystray pillow
   mkdir -p "$SHARE/app"
-  cp "$HERE"/pc-agent/{deskdash_app.py,deskdash_agent.py,spotify.py,sys_linux.py,sys_windows.py} "$SHARE/app/"
+  cp "$HERE"/pc-agent/{deskdash_app.py,deskdash_agent.py,calls.py,daystats.py,printers.py,spotify.py,stream.py,sys_linux.py,sys_windows.py} "$SHARE/app/"
   EXEC="$SHARE/venv/bin/python $SHARE/app/deskdash_app.py"
 fi
 
