@@ -1772,7 +1772,10 @@ public class SettingsActivity extends Activity {
         e.setInputType(InputType.TYPE_CLASS_NUMBER);
         e.setGravity(Gravity.CENTER);
         if (sp.contains(key)) e.setText(String.valueOf(sp.getInt(key, 0)));
+        String[] shown = {e.getText().toString().trim()};
         savers.add(() -> {
+            if (e.getText().toString().trim().equals(shown[0])) return;
+            shown[0] = e.getText().toString().trim();
             try {
                 sp.edit().putInt(key, Math.max(0, Math.min(23, Integer.parseInt(e.getText().toString().trim())))).apply();
             } catch (NumberFormatException ex) {
@@ -1796,8 +1799,12 @@ public class SettingsActivity extends Activity {
         } else {
             e.setText(sp.getString(key, ""));
         }
+        // only what was typed here: "Найти ПК" and the like store values behind a field that still shows the old ones
+        String[] shown = {e.getText().toString().trim()};
         savers.add(() -> {
             String v = e.getText().toString().trim();
+            if (v.equals(shown[0])) return;
+            shown[0] = v;
             SharedPreferences.Editor ed = sp.edit();
             if (isInt) {
                 try {
