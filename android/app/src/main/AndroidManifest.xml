@@ -45,12 +45,6 @@
             android:theme="@style/Ios" />
 
         <activity
-            android:name=".DeskEditorActivity"
-            android:exported="false"
-            android:label="Столы и блоки"
-            android:theme="@style/Ios" />
-
-        <activity
             android:name=".WelcomeActivity"
             android:exported="false"
             android:screenOrientation="sensorLandscape"

@@ -42,7 +42,31 @@ public final class DashTheme {
             new DashTheme("mint", "Мята", 0xFF000000, 0xFF1C1C1E, 0xFFFFFFFF, 0xFF8E8E93, 0xFF38383A,
                     0xFF30D158, 0xFFFF453A, false, EVENTS_DARK),
             new DashTheme("sand", "Песок", 0xFFF4F1EC, 0xFFFFFFFF, 0xFF1C1C1E, 0xFF8D877F, 0xFFE7E1D8,
-                    0xFFFF9500, 0xFFFF3B30, true, EVENTS_LIGHT),
+                    0xFFC96A00, 0xFFFF3B30, true, EVENTS_LIGHT),
+            new DashTheme("graphite", "Графит", 0xFF121316, 0xFF23252A, 0xFFF1F2F4, 0xFF9A9EA6, 0xFF393C43,
+                    0xFF8FB2D9, 0xFFFF6961, false, EVENTS_DARK),
+            new DashTheme("deep", "Глубина", 0xFF05121B, 0xFF10242F, 0xFFEAF4F8, 0xFF86A3B1, 0xFF213946,
+                    0xFF38BDF8, 0xFFFF6B6B, false, EVENTS_DARK),
+            new DashTheme("forest", "Лес", 0xFF08120C, 0xFF15211A, 0xFFEAF2EC, 0xFF88A08F, 0xFF28372D,
+                    0xFF5FCB8A, 0xFFFF7A6B, false, EVENTS_DARK),
+            new DashTheme("dusk", "Сумерки", 0xFF0F0A1B, 0xFF1F1830, 0xFFF1ECFA, 0xFF9D93B6, 0xFF352C4B,
+                    0xFFB18CFF, 0xFFFF6B8A, false, EVENTS_DARK),
+            new DashTheme("wine", "Вино", 0xFF13070B, 0xFF261319, 0xFFF8ECEF, 0xFFAB9099, 0xFF3D242B,
+                    0xFFFF5C7A, 0xFFFFB020, false, EVENTS_DARK),
+            new DashTheme("coffee", "Кофе", 0xFF130F0B, 0xFF241C15, 0xFFF3EBE1, 0xFFA8987F, 0xFF3B2F24,
+                    0xFFE0A458, 0xFFFF6F4F, false, EVENTS_DARK),
+            new DashTheme("neon", "Неон", 0xFF0C0220, 0xFF1B0A3A, 0xFFF6EBFF, 0xFFA48DC9, 0xFF371C60,
+                    0xFFFF2E97, 0xFF22E3FF, false, 0xFFFF2E97, 0xFF22E3FF, 0xFFFFD23F, 0xFF9B5DE5, 0xFF00F5A0, 0xFFFF7A00),
+            new DashTheme("console", "Терминал", 0xFF030703, 0xFF0D160D, 0xFFC4F5C4, 0xFF6F9F6F, 0xFF1E301E,
+                    0xFF4ADE80, 0xFFFFC857, false, 0xFF4ADE80, 0xFF22D3EE, 0xFFFFC857, 0xFFA3E635, 0xFF2DD4BF, 0xFFFACC15),
+            new DashTheme("ice", "Лёд", 0xFFEDF3F9, 0xFFFFFFFF, 0xFF0F1C2B, 0xFF6F8096, 0xFFDCE6F0,
+                    0xFF1677D2, 0xFFE5383B, true, EVENTS_LIGHT),
+            new DashTheme("meadow", "Луг", 0xFFEEF4EB, 0xFFFFFFFF, 0xFF17231A, 0xFF708274, 0xFFDEE8DA,
+                    0xFF22884B, 0xFFE5484D, true, EVENTS_LIGHT),
+            new DashTheme("rose", "Роза", 0xFFFBF0F3, 0xFFFFFFFF, 0xFF2A1A1F, 0xFF947780, 0xFFF1DFE4,
+                    0xFFD6336C, 0xFFE8590C, true, EVENTS_LIGHT),
+            new DashTheme("lavender", "Лаванда", 0xFFF3F0FA, 0xFFFFFFFF, 0xFF1E1830, 0xFF7F7796, 0xFFE5DFF2,
+                    0xFF6D4AE8, 0xFFE5383B, true, EVENTS_LIGHT),
             new DashTheme("night", "Ночь", 0xFF000000, 0xFF0A0303, 0xFFB3261E, 0xFF5E1712, 0xFF1A0706,
                     0xFFD13A2F, 0xFFFF3B30, false,
                     0xFF3A0E0B, 0xFF4F1410, 0xFF2A0907, 0xFF611A14, 0xFF451210, 0xFF330C0A, 0xFF571713, 0xFF6B1E17),
@@ -82,6 +106,11 @@ public final class DashTheme {
         return new DashTheme(id, name, bg, surface, text, dim, line, color | 0xFF000000, now, light, events);
     }
 
+    /** Id and name of the wallpapers, in the order they are offered. */
+    public static final String[][] WALLPAPERS = {{"none", "Нет"}, {"aurora", "Сияние"}, {"sunset", "Закат"}, {"ocean", "Океан"},
+            {"graphite", "Графит"}, {"forest", "Лес"}, {"plum", "Слива"}, {"ember", "Угли"}, {"dawn", "Рассвет"}, {"sky", "Небо"},
+            {"blossom", "Цветение"}, {"mist", "Туман"}};
+
     /** Wallpaper gradients behind the widgets, by id; null for none. */
     public static int[] wallpaper(String id) {
         switch (id == null ? "" : id) {
@@ -91,6 +120,11 @@ public final class DashTheme {
             case "graphite": return new int[]{0xFF101012, 0xFF2A2A30, 0xFF15151A};
             case "dawn": return new int[]{0xFFFDE4D0, 0xFFF3D9F2, 0xFFDCE4FF};
             case "sky": return new int[]{0xFFD8EAFF, 0xFFEFF4FF, 0xFFE6F7F1};
+            case "forest": return new int[]{0xFF07140E, 0xFF12382A, 0xFF0E2A36};
+            case "plum": return new int[]{0xFF150A24, 0xFF3A1650, 0xFF20102F};
+            case "ember": return new int[]{0xFF140A06, 0xFF4A1B10, 0xFF1E0F0A};
+            case "blossom": return new int[]{0xFFFFE6EE, 0xFFFFF1E6, 0xFFF3E6FF};
+            case "mist": return new int[]{0xFFE6ECEF, 0xFFF4F6F7, 0xFFDFE7E4};
             default: return null;
         }
     }
@@ -123,8 +157,18 @@ public final class DashTheme {
         int i = 0;
         String real = byId(id).id;
         for (; i < ALL.length; i++) if (ALL[i].id.equals(real)) break;
-        DashTheme n = ALL[(i + 1) % ALL.length];
-        return n.isNight() ? ALL[0] : n;
+        for (int k = 1; k <= ALL.length; k++) {
+            DashTheme n = ALL[(i + k) % ALL.length];
+            if (!n.isNight()) return n;
+        }
+        return ALL[0];
+    }
+
+    /** The themes a person can choose, dark or light; the night ones only come on by themselves. */
+    public static java.util.List<DashTheme> choices(boolean light) {
+        java.util.List<DashTheme> out = new java.util.ArrayList<>();
+        for (DashTheme t : ALL) if (!t.isNight() && t.light == light) out.add(t);
+        return out;
     }
 
     public int eventColor(int googleColor, String key, boolean useGoogle) {

@@ -252,6 +252,17 @@ public class DashboardView extends FrameLayout {
 
     // editing the desk right on the screen: widgets wobble and get buttons, as on an iPhone
     private boolean editing;
+    /** The columns on screen while editing, and the line that shows where a dragged widget would land. */
+    private final List<LinearLayout> editCols = new ArrayList<>();
+    private final List<android.animation.Animator> wobbles = new ArrayList<>();
+    private View dropMark;
+    /** The desks before the last big change, for "Вернуть". */
+    private String undoDesks;
+    private ScrollView sheetScroll;
+    private WeatherPanel sheetWeather;
+    /** Reopening a sheet under a change: no fade, no click. */
+    private boolean quietSheet;
+    private float pressX, pressY;
 
     // messages, timers, voice
     private final List<MessagesPanel> messagePanels = new ArrayList<>();
@@ -433,7 +444,10 @@ public class DashboardView extends FrameLayout {
         Modes.Mode mode = activeMode();
         look = mode != null && !mode.look.isEmpty() ? mode.look : prefs.uiStyle();
         boolean nightClock = nightActive && "clock".equals(prefs.nightLook());
-        if (peeking) {
+        if (editing) {
+            // the dock keeps its rail on the left: its "Стол" page is the desk being edited
+            if (!"dock".equals(look)) look = "bento";
+        } else if (peeking) {
             if ("standby".equals(look)) look = "bento";
         } else if (nightClock) {
             look = "night";
@@ -477,11 +491,9 @@ public class DashboardView extends FrameLayout {
         level = new LevelView(ctx);
         level.setAlpha(0f);
         addView(level, new LayoutParams(px(52), px(200), Gravity.CENTER_VERTICAL | Gravity.END));
-        if (!editing || !"bento".equals(look)) {
-            editing = false;
-            if (deskSwipe && !"dock".equals(look)) buildBar(di, !used.contains("calendar") && !used.contains("clock"));
-            else if (deskSwipe) buildBar(di, false);
-        }
+        if (editing) buildEditBar();
+        else if (deskSwipe && !"dock".equals(look)) buildBar(di, !used.contains("calendar") && !used.contains("clock"));
+        else if (deskSwipe) buildBar(di, false);
 
         applyPadding();
         applyNightWindow();
@@ -511,10 +523,11 @@ public class DashboardView extends FrameLayout {
             JSONObject col = cols.optJSONObject(i);
             if (col == null) continue;
             if (into.getChildCount() > 0) {
-                View div = new View(ctx);
+                View div = editing ? columnGrip(i - 1, portrait) : new View(ctx);
                 LinearLayout.LayoutParams dl;
                 if (bento) {
-                    dl = portrait ? new LinearLayout.LayoutParams(-1, px(14)) : new LinearLayout.LayoutParams(px(14), -1);
+                    int gap = px(editing ? 26 : 14);
+                    dl = portrait ? new LinearLayout.LayoutParams(-1, gap) : new LinearLayout.LayoutParams(gap, -1);
                 } else if (portrait) {
                     div.setBackgroundColor(th.line);
                     dl = new LinearLayout.LayoutParams(-1, Math.max(1, (int) dp));
@@ -537,26 +550,22 @@ public class DashboardView extends FrameLayout {
                 if (v == null) continue;
                 int h = b.optInt("h", Desks.defaultHeight(t));
                 if (h <= 0 && Desks.needsHeight(t)) h = 1;
-                // music and weather draw their own backgrounds (the cover, the sky)
-                if (bento && !"music".equals(t) && !"weather".equals(t) && !"photos".equals(t)) v = card(v, card, h > 0);
-                if (editing) v = editable(v, i, j, ncols, blocks.length(), t, h);
+                // music, photos and the sky of the weather are their own backgrounds
+                String bg = b.optString("bg");
+                boolean own = "music".equals(t) || "photos".equals(t) || "weather".equals(t) && bg.isEmpty();
+                // on the dock's flat desk only a widget that asked for a background gets one
+                if (bento ? !own : "tint".equals(bg) || "card".equals(bg)) v = card(v, cardColor(card, bg), h > 0);
+                if (editing) v = editable(v, i, j, b);
                 LinearLayout.LayoutParams lp = h > 0 ? new LinearLayout.LayoutParams(-1, 0, h) : new LinearLayout.LayoutParams(-1, -2);
                 if (colView.getChildCount() > 0) lp.topMargin = px(14);
                 colView.addView(v, lp);
             }
             if (editing) {
                 int ci = i;
-                LinearLayout row = new LinearLayout(ctx);
-                row.addView(Ui.pill(ctx, "+ Виджет", Ui.fill(th), th.accent, v -> addWidget(ci)), new LinearLayout.LayoutParams(0, -2, 1));
-                // "Готово" closes the row of the last column, where the bar usually is
-                if (i == cols.length() - 1) {
-                    TextView done = Ui.pill(ctx, "Готово", th.accent, DashTheme.onColor(th.accent), v -> {
-                        editing = false;
-                        build();
-                    });
-                    row.addView(done, margins(-2, -2, 10, 0, 0, 0));
-                }
-                colView.addView(row, margins(-1, -2, 0, 14, 0, 0));
+                colView.setClipChildren(false);
+                colView.addView(Ui.pill(ctx, "+ Виджет", Ui.fill(th), th.accent, v -> addWidget(ci)), margins(-1, -2, 0, 14, 0, 0));
+                into.setClipChildren(false);
+                editCols.add(colView);
             }
             int w = Math.max(1, col.optInt("w", 50));
             into.addView(colView, portrait ? new LinearLayout.LayoutParams(-1, 0, w) : new LinearLayout.LayoutParams(0, -1, w));
@@ -564,102 +573,294 @@ public class DashboardView extends FrameLayout {
     }
 
     /**
-     * A widget while the desk is being edited: it wobbles, its content doesn't react, and a row of round
-     * buttons moves it up, down or to the next column, changes its height or removes it.
+     * A widget while the desk is being edited: it wobbles and its content doesn't react. Dragged, it moves anywhere
+     * on the desk; tapped, it opens its settings; ✕ takes it away.
      */
-    private View editable(View v, int col, int row, int ncols, int nrows, String type, int h) {
+    private View editable(View v, int col, int row, JSONObject b) {
         FrameLayout f = new FrameLayout(ctx);
+        f.setTag(new int[]{col, row});
         v.setAlpha(0.55f);
         f.addView(v, new FrameLayout.LayoutParams(-1, -1));
-        View shield = new View(ctx);
-        shield.setClickable(true);
-        f.addView(shield, new FrameLayout.LayoutParams(-1, -1));
-        LinearLayout btns = new LinearLayout(ctx);
-        btns.setGravity(Gravity.CENTER);
-        btns.setPadding(px(6), px(6), px(6), px(6));
-        btns.setBackground(rounded(th.light ? 0xE6FFFFFF : 0xE62C2C2E, 100));
-        btns.setElevation(6 * dp);
-        if (row > 0) btns.addView(editButton("↑", th.text, () -> editDesk(col, row, "up")));
-        if (row < nrows - 1) btns.addView(editButton("↓", th.text, () -> editDesk(col, row, "down")));
-        if (col > 0) btns.addView(editButton("←", th.text, () -> editDesk(col, row, "left")));
-        if (col < ncols - 1) btns.addView(editButton("→", th.text, () -> editDesk(col, row, "right")));
-        btns.addView(editButton(h <= 0 ? "авто" : "×" + h, th.accent, () -> editDesk(col, row, "size")));
-        btns.addView(editButton("✕", Ui.RED, () -> editDesk(col, row, "remove")));
-        FrameLayout.LayoutParams bl = new FrameLayout.LayoutParams(-2, -2, Gravity.TOP | Gravity.END);
-        bl.setMargins(0, px(8), px(8), 0);
-        f.addView(btns, bl);
-        TextView name = text(th.dim, 12);
-        name.setText(Desks.typeName(type));
-        name.setTypeface(Ui.font(600));
-        FrameLayout.LayoutParams nl = new FrameLayout.LayoutParams(-2, -2, Gravity.BOTTOM | Gravity.CENTER_HORIZONTAL);
-        nl.bottomMargin = px(6);
-        f.addView(name, nl);
-        // the wobble
         android.animation.ObjectAnimator a = android.animation.ObjectAnimator.ofFloat(f, "rotation", -0.6f, 0.6f);
         a.setDuration(130 + rnd.nextInt(40));
         a.setRepeatCount(android.animation.ValueAnimator.INFINITE);
         a.setRepeatMode(android.animation.ValueAnimator.REVERSE);
         a.setStartDelay(rnd.nextInt(120));
         a.start();
+        wobbles.add(a);
+        View shield = new View(ctx) {
+            /** As big as the widget: a plain View takes all the height a block sized by its content is offered. */
+            @Override
+            protected void onMeasure(int ws, int hs) {
+                setMeasuredDimension(MeasureSpec.getMode(ws) == MeasureSpec.EXACTLY ? MeasureSpec.getSize(ws) : 0,
+                        MeasureSpec.getMode(hs) == MeasureSpec.EXACTLY ? MeasureSpec.getSize(hs) : 0);
+            }
+        };
+        shield.setContentDescription("Настройки виджета: " + blockName(b));
+        shield.setOnTouchListener(new WidgetDrag(f, col, row, a));
+        f.addView(shield, new FrameLayout.LayoutParams(-1, -1));
+        TextView name = text(th.text, 13);
+        name.setTypeface(Ui.font(600));
+        name.setText(blockName(b));
+        name.setSingleLine();
+        name.setPadding(px(12), px(6), px(12), px(6));
+        name.setBackground(rounded(th.light ? 0xE6FFFFFF : 0xE62C2C2E, 100));
+        f.addView(name, new FrameLayout.LayoutParams(-2, -2, Gravity.CENTER));
+        TextView x = text(0xFFFFFFFF, 14);
+        x.setTypeface(Ui.font(700));
+        x.setText("✕");
+        x.setGravity(Gravity.CENTER);
+        x.setContentDescription("Убрать виджет");
+        x.setBackground(rounded(Ui.RED, 100));
+        x.setElevation(4 * dp);
+        x.setOnClickListener(v2 -> removeWidget(col, row));
+        FrameLayout.LayoutParams xl = new FrameLayout.LayoutParams(px(32), px(32), Gravity.TOP | Gravity.END);
+        xl.setMargins(0, px(6), px(6), 0);
+        f.addView(x, xl);
         return f;
     }
 
-    private TextView editButton(String label, int color, Runnable r) {
-        TextView b = text(color, 15);
-        b.setTypeface(Ui.font(700));
-        b.setText(label);
-        b.setGravity(Gravity.CENTER);
-        b.setMinWidth(px(38));
-        b.setPadding(px(8), px(6), px(8), px(6));
-        b.setOnClickListener(v -> {
-            performHapticFeedback(HapticFeedbackConstants.VIRTUAL_KEY);
-            r.run();
-        });
-        return b;
+    private static String blockName(JSONObject b) {
+        String t = b.optString("t"), title = b.optString("title");
+        return "home".equals(t) && !title.isEmpty() ? title : Desks.typeName(t);
     }
 
-    /** One edit of the current desk ("up", "down", "left", "right", "size", "remove"), saved at once. */
-    private void editDesk(int col, int row, String what) {
-        try {
-            JSONArray desks = Desks.load(prefs);
-            JSONObject desk = desks.getJSONObject(curDesk);
-            JSONArray cols = desk.getJSONArray("cols");
-            JSONArray blocks = cols.getJSONObject(col).getJSONArray("blocks");
-            List<Object> l = Desks.toList(blocks);
-            JSONObject b = blocks.getJSONObject(row);
-            switch (what) {
-                case "up":
-                case "down": {
-                    int to = row + ("up".equals(what) ? -1 : 1);
-                    l.set(row, l.get(to));
-                    l.set(to, b);
-                    break;
+    /** The finger on a widget being edited: a tap opens its settings, a drag carries it to the place the accent line shows. */
+    private final class WidgetDrag implements OnTouchListener {
+        private final View card;
+        private final int col, row;
+        private final android.animation.Animator wobble;
+        private float x0, y0;
+        private boolean dragging;
+        private int toCol, toRow;
+
+        WidgetDrag(View card, int col, int row, android.animation.Animator wobble) {
+            this.card = card;
+            this.col = col;
+            this.row = row;
+            this.wobble = wobble;
+        }
+
+        @Override
+        public boolean onTouch(View v, MotionEvent e) {
+            switch (e.getActionMasked()) {
+                case MotionEvent.ACTION_DOWN:
+                    x0 = e.getRawX();
+                    y0 = e.getRawY();
+                    dragging = false;
+                    v.getParent().requestDisallowInterceptTouchEvent(true);
+                    return true;
+                case MotionEvent.ACTION_MOVE: {
+                    float dx = e.getRawX() - x0, dy = e.getRawY() - y0;
+                    if (!dragging) {
+                        if (Math.hypot(dx, dy) < 10 * dp) return true;
+                        dragging = true;
+                        toCol = col;
+                        toRow = row;
+                        wobble.cancel();
+                        card.setRotation(0);
+                        card.setAlpha(0.9f);
+                        card.setScaleX(1.03f);
+                        card.setScaleY(1.03f);
+                        // above the other columns too, which are drawn after this one
+                        ((View) card.getParent()).setTranslationZ(30 * dp);
+                        performHapticFeedback(HapticFeedbackConstants.VIRTUAL_KEY);
+                    }
+                    card.setTranslationX(dx);
+                    card.setTranslationY(dy);
+                    aim(e.getRawX(), e.getRawY());
+                    return true;
                 }
-                case "left":
-                case "right": {
-                    l.remove(row);
-                    JSONObject other = cols.getJSONObject(col + ("left".equals(what) ? -1 : 1));
-                    other.getJSONArray("blocks").put(b);
-                    break;
-                }
-                case "size": {
-                    String t = b.optString("t");
-                    int h = b.optInt("h", Desks.defaultHeight(t));
-                    h = (h + 1) % 4;
-                    if (h == 0 && Desks.needsHeight(t)) h = 1;
-                    b.put("h", h);
-                    break;
-                }
+                // after this touch: build() takes the views away, and that cancels the touch they are in the middle of
+                case MotionEvent.ACTION_UP:
+                    if (dragging) post(() -> moveWidget(col, row, toCol, toRow));
+                    else post(() -> openWidget(col, row));
+                    return true;
+                case MotionEvent.ACTION_CANCEL:
+                    if (dragging) post(DashboardView.this::build);
+                    return true;
                 default:
-                    l.remove(row);
-                    break;
+                    return true;
             }
-            cols.getJSONObject(col).put("blocks", Desks.fromList(l));
+        }
+
+        /** Finds the column under the finger and the gap between its widgets, and puts the line there. */
+        private void aim(float rx, float ry) {
+            boolean stacked = content.getOrientation() == LinearLayout.VERTICAL;
+            int[] at = new int[2];
+            LinearLayout best = null;
+            float bestGap = Float.MAX_VALUE;
+            for (int c = 0; c < editCols.size(); c++) {
+                LinearLayout cv = editCols.get(c);
+                cv.getLocationOnScreen(at);
+                float from = stacked ? at[1] : at[0], to = from + (stacked ? cv.getHeight() : cv.getWidth()), p = stacked ? ry : rx;
+                float gap = p < from ? from - p : p > to ? p - to : 0;
+                if (gap < bestGap) {
+                    bestGap = gap;
+                    best = cv;
+                    toCol = c;
+                }
+            }
+            if (best == null) return;
+            best.getLocationOnScreen(at);
+            int colX = at[0], colY = at[1];
+            float line = colY;
+            int next = 0;
+            toRow = -1;
+            for (int i = 0; i < best.getChildCount(); i++) {
+                View w = best.getChildAt(i);
+                if (!(w.getTag() instanceof int[])) continue;
+                int[] tag = (int[]) w.getTag();
+                if (ry < colY + (w.getTop() + w.getBottom()) / 2f) {
+                    toRow = tag[1];
+                    line = colY + w.getTop() - px(9);
+                    break;
+                }
+                next = tag[1] + 1;
+                line = colY + w.getBottom() + px(5);
+            }
+            if (toRow < 0) toRow = next;
+            if (dropMark == null) {
+                dropMark = new View(ctx);
+                dropMark.setBackground(rounded(th.accent, 100));
+                dropMark.setElevation(40 * dp);
+                addView(dropMark, new LayoutParams(best.getWidth(), px(4), Gravity.TOP | Gravity.START));
+            }
+            if (dropMark.getLayoutParams().width != best.getWidth()) {
+                dropMark.getLayoutParams().width = best.getWidth();
+                dropMark.requestLayout();
+            }
+            DashboardView.this.getLocationOnScreen(at);
+            dropMark.setTranslationX(colX - at[0]);
+            dropMark.setTranslationY(line - at[1]);
+        }
+    }
+
+    /** The bar between two columns while editing: dragged, it shares the width between them. */
+    private View columnGrip(int left, boolean stacked) {
+        FrameLayout g = new FrameLayout(ctx);
+        View mark = new View(ctx);
+        mark.setBackground(rounded(th.accent, 100));
+        g.addView(mark, stacked ? new FrameLayout.LayoutParams(px(44), px(5), Gravity.CENTER) : new FrameLayout.LayoutParams(px(5), px(44), Gravity.CENTER));
+        g.setContentDescription("Ширина колонок");
+        g.setOnTouchListener(new OnTouchListener() {
+            private float start, size, wl, wr;
+
+            @Override
+            public boolean onTouch(View v, MotionEvent e) {
+                if (left + 1 >= editCols.size()) return false;
+                LinearLayout l = editCols.get(left), r = editCols.get(left + 1);
+                LinearLayout.LayoutParams ll = (LinearLayout.LayoutParams) l.getLayoutParams(), rl = (LinearLayout.LayoutParams) r.getLayoutParams();
+                float p = stacked ? e.getRawY() : e.getRawX();
+                switch (e.getActionMasked()) {
+                    case MotionEvent.ACTION_DOWN:
+                        v.getParent().requestDisallowInterceptTouchEvent(true);
+                        start = p;
+                        size = stacked ? l.getHeight() + r.getHeight() : l.getWidth() + r.getWidth();
+                        wl = ll.weight;
+                        wr = rl.weight;
+                        return true;
+                    case MotionEvent.ACTION_MOVE: {
+                        float sum = wl + wr, min = sum * 0.2f;
+                        float nl = Math.max(min, Math.min(sum - min, wl + (p - start) / Math.max(1, size) * sum));
+                        ll.weight = nl;
+                        rl.weight = sum - nl;
+                        l.requestLayout();
+                        r.requestLayout();
+                        return true;
+                    }
+                    case MotionEvent.ACTION_UP:
+                        int nw = Math.max(1, Math.round(ll.weight)), other = Math.max(1, Math.round(rl.weight));
+                        post(() -> changeDesk(cols -> {
+                            cols.getJSONObject(left).put("w", nw);
+                            cols.getJSONObject(left + 1).put("w", other);
+                        }, false));
+                        return true;
+                    default:
+                        return true;
+                }
+            }
+        });
+        return g;
+    }
+
+    /** The bar of the editing screen, in place of the usual one. */
+    private void buildEditBar() {
+        hasBar = true;
+        LinearLayout bar = new LinearLayout(ctx);
+        bar.setGravity(Gravity.CENTER_VERTICAL);
+        bar.setPadding(px(16), px(5), px(5), px(5));
+        bar.setBackground(rounded(th.surface, 100));
+        bar.setElevation(8 * dp);
+        if (getResources().getConfiguration().orientation == Configuration.ORIENTATION_LANDSCAPE) {
+            TextView how = text(th.dim, 13);
+            how.setSingleLine();
+            how.setText("Тяни, чтобы переставить · тап — настройки");
+            bar.addView(how, margins(-2, -2, 0, 0, 10, 0));
+        }
+        if (undoDesks != null) {
+            bar.addView(Ui.pill(ctx, "Вернуть", Ui.fill(th), th.text, v -> {
+                prefs.setDesks(undoDesks);
+                undoDesks = null;
+                build();
+            }), margins(-2, -2, 0, 0, 6, 0));
+        }
+        bar.addView(Ui.pill(ctx, "Столы", Ui.fill(th), th.text, v -> openDesks()), margins(-2, -2, 0, 0, 6, 0));
+        bar.addView(Ui.pill(ctx, "+ Колонка", Ui.fill(th), th.text, v -> changeDesk(cols -> cols.put(Desks.column(40)), true)),
+                margins(-2, -2, 0, 0, 6, 0));
+        bar.addView(Ui.pill(ctx, "Готово", th.accent, DashTheme.onColor(th.accent), v -> finishEditing()));
+        FrameLayout.LayoutParams lp = new FrameLayout.LayoutParams(-2, -2, Gravity.BOTTOM | Gravity.CENTER_HORIZONTAL);
+        lp.bottomMargin = cutB + px(6);
+        addView(bar, lp);
+    }
+
+    private interface ColsEdit {
+        void apply(JSONArray cols) throws org.json.JSONException;
+    }
+
+    private interface BlockEdit {
+        void apply(JSONObject b) throws org.json.JSONException;
+    }
+
+    private interface DesksEdit {
+        void apply(JSONArray desks) throws org.json.JSONException;
+    }
+
+    private void changeDesks(DesksEdit e) {
+        changeDesks(e, true);
+    }
+
+    /** Saves a change of the desks and redraws; undoable keeps what was before for "Вернуть". */
+    private void changeDesks(DesksEdit e, boolean undoable) {
+        try {
+            String before = prefs.desks();
+            JSONArray desks = Desks.load(prefs);
+            e.apply(desks);
             Desks.save(prefs, desks);
-        } catch (org.json.JSONException e) {
-            Toast.makeText(ctx, "Не вышло: " + e.getMessage(), Toast.LENGTH_SHORT).show();
+            if (undoable) undoDesks = before;
+        } catch (org.json.JSONException ex) {
+            Toast.makeText(ctx, "Не вышло: " + ex.getMessage(), Toast.LENGTH_SHORT).show();
         }
         build();
+    }
+
+    /** The same for the columns of this desk. */
+    private void changeDesk(ColsEdit e, boolean undoable) {
+        changeDesks(desks -> e.apply(desks.getJSONObject(curDesk).getJSONArray("cols")), undoable);
+    }
+
+    private void moveWidget(int col, int row, int toCol, int toRow) {
+        changeDesk(cols -> Desks.move(cols, col, row, toCol, toRow), false);
+    }
+
+    private void removeWidget(int col, int row) {
+        closeSheet();
+        changeDesk(cols -> {
+            JSONObject c = cols.getJSONObject(col);
+            List<Object> l = Desks.toList(c.getJSONArray("blocks"));
+            l.remove(row);
+            c.put("blocks", Desks.fromList(l));
+        }, true);
     }
 
     /** "+ Виджет" in a column: every kind of block, the ones already on this desk only when they may repeat. */
@@ -671,30 +872,420 @@ public class DashboardView extends FrameLayout {
             JSONArray bl = cols.optJSONObject(i).optJSONArray("blocks");
             for (int j = 0; bl != null && j < bl.length(); j++) on.add(bl.optJSONObject(j).optString("t"));
         }
+        int row = cols == null ? 0 : cols.optJSONObject(col).optJSONArray("blocks").length();
         for (String[] t : Desks.TYPES) {
             if (Desks.single(t[0]) && on.contains(t[0])) continue;
-            menuRow(m, t[1], false, () -> {
+            menuRow(m, t[1], t[2], false, () -> {
                 closeSheet();
-                try {
-                    JSONArray desks = Desks.load(prefs);
-                    desks.getJSONObject(curDesk).getJSONArray("cols").getJSONObject(col).getJSONArray("blocks").put(Desks.block(t[0]));
-                    Desks.save(prefs, desks);
-                } catch (org.json.JSONException ignored) {
-                    // constant keys
+                changeDesk(c -> c.getJSONObject(col).getJSONArray("blocks").put(Desks.block(t[0])), false);
+                if ("home".equals(t[0])) pickDevices(col, row);
+            });
+        }
+        openSheet(m);
+    }
+
+    /** Long press on a desk, ⋮ or the settings. The dock stays as it is; the other looks show the desk as widgets while it changes. */
+    public void startEditing() {
+        if (nightActive) {
+            Toast.makeText(ctx, "Ночью стол не меняется", Toast.LENGTH_SHORT).show();
+            return;
+        }
+        editing = true;
+        undoDesks = null;
+        build();
+    }
+
+    private void finishEditing() {
+        editing = false;
+        undoDesks = null;
+        try {
+            JSONArray desks = Desks.load(prefs);
+            for (int i = 0; i < desks.length(); i++) Desks.dropEmptyColumns(desks.getJSONObject(i));
+            Desks.save(prefs, desks);
+        } catch (org.json.JSONException ignored) {
+            // a desk without columns has nothing to tidy
+        }
+        build();
+    }
+
+    // ---------------------------------------------------------------- a widget's settings
+
+    /** The widget's own sheet, next to it, so the change shows on the desk at once. */
+    private void openWidget(int col, int row) {
+        JSONArray cols = Desks.load(prefs).optJSONObject(curDesk).optJSONArray("cols");
+        JSONObject b = cols == null ? null : cols.optJSONObject(col).optJSONArray("blocks").optJSONObject(row);
+        if (b == null) return;
+        String t = b.optString("t");
+        LinearLayout m = menu(blockName(b));
+
+        int h = b.optInt("h", Desks.defaultHeight(t));
+        if (h <= 0 && Desks.needsHeight(t)) h = 1;
+        List<String[]> sizes = new ArrayList<>();
+        if (!Desks.needsHeight(t)) sizes.add(new String[]{"0", "Авто"});
+        sizes.add(new String[]{"1", "Обычная"});
+        sizes.add(new String[]{"2", "Больше"});
+        sizes.add(new String[]{"3", "Максимум"});
+        choice(m, "Высота", sizes.toArray(new String[0][]), String.valueOf(h), id -> changeBlock(col, row, x -> x.put("h", Integer.parseInt(id))));
+
+        if (!"music".equals(t) && !"photos".equals(t)) {
+            String[][] backs = "weather".equals(t)
+                    ? new String[][]{{"", "Небо"}, {"card", "Карточка"}, {"tint", "Цвет акцента"}, {"clear", "Без фона"}}
+                    : new String[][]{{"", "Карточка"}, {"tint", "Цвет акцента"}, {"clear", "Без фона"}};
+            choice(m, "Фон", backs, b.optString("bg"), id -> changeBlock(col, row, x -> x.put("bg", id)));
+        }
+
+        switch (t) {
+            case "clock":
+                choice(m, "Стиль", FancyClock.STYLES, prefs.clockStyle(), id -> changeStyle(col, row, () -> prefs.setClockStyle(id)));
+                setting(m, "Секунды", prefs.seconds(), on -> changeStyle(col, row, () -> prefs.raw().edit().putBoolean("seconds", on).apply()));
+                setting(m, "24-часовой формат", prefs.h24(), on -> changeStyle(col, row, () -> prefs.raw().edit().putBoolean("h24", on).apply()));
+                if (Weather.configured(prefs)) {
+                    setting(m, "Погода под часами", prefs.weatherClock(), on -> changeStyle(col, row, () -> prefs.raw().edit().putBoolean("weather_clock", on).apply()));
                 }
+                break;
+            case "weather":
+                setting(m, "По часам", b.optBoolean("hours", true), on -> changeBlock(col, row, x -> x.put("hours", on)));
+                setting(m, "На неделю", b.optBoolean("week", true), on -> changeBlock(col, row, x -> x.put("week", on)));
+                if (b.optBoolean("week", true)) {
+                    choice(m, "Сколько дней", new String[][]{{"3", "3"}, {"5", "5"}, {"7", "7"}}, String.valueOf(b.optInt("days", 7)),
+                            id -> changeBlock(col, row, x -> x.put("days", Integer.parseInt(id))));
+                }
+                break;
+            case "home":
+                menuRow(m, "Устройства: " + Desks.items(b).size() + "…", false, () -> pickDevices(col, row));
+                menuRow(m, b.optString("title").isEmpty() ? "Название…" : "Название: " + b.optString("title") + "…", false,
+                        () -> askText("Название виджета", b.optString("title"), s -> changeBlock(col, row, x -> x.put("title", s))));
+                break;
+            case "photos":
+                choice(m, "Менять фото", new String[][]{{"10", "10 с"}, {"20", "20 с"}, {"60", "Минута"}, {"300", "5 минут"}},
+                        String.valueOf(b.optInt("every", 20)), id -> changeBlock(col, row, x -> x.put("every", Integer.parseInt(id))));
+                break;
+            case "calendar":
+                setting(m, "Цвета как в Google", prefs.googleColors(), on -> changeStyle(col, row, () -> prefs.raw().edit().putBoolean("google_colors", on).apply()));
+                break;
+            case "music":
+                setting(m, "Цвет кнопок из обложки", prefs.artAccent(), on -> changeStyle(col, row, () -> prefs.raw().edit().putBoolean("art_accent", on).apply()));
+                break;
+            default:
+                break;
+        }
+
+        String page = Desks.settingsPage(t);
+        if (page != null) {
+            menuRow(m, "Все настройки раздела", false, () -> {
+                closeSheet();
+                ctx.startActivity(new Intent(ctx, SettingsActivity.class).putExtra(SettingsActivity.EXTRA_PAGE, page).addFlags(Intent.FLAG_ACTIVITY_NEW_TASK));
+            });
+        }
+        m.addView(Ui.pill(ctx, "Убрать виджет", groupColor(), Ui.RED, v -> removeWidget(col, row)), margins(-1, -2, 0, 2, 0, 8));
+        boolean leftHalf = col + 0.5f < cols.length() / 2f || cols.length() == 1;
+        openSheet(m, getResources().getConfiguration().orientation == Configuration.ORIENTATION_PORTRAIT ? Gravity.CENTER
+                : leftHalf ? Gravity.END : Gravity.START);
+    }
+
+    /** Saves one setting of a widget; the desk changes behind its sheet, which stays open. */
+    private void changeBlock(int col, int row, BlockEdit e) {
+        try {
+            JSONArray desks = Desks.load(prefs);
+            e.apply(desks.getJSONObject(curDesk).getJSONArray("cols").getJSONObject(col).getJSONArray("blocks").getJSONObject(row));
+            Desks.save(prefs, desks);
+        } catch (org.json.JSONException ex) {
+            Toast.makeText(ctx, "Не вышло: " + ex.getMessage(), Toast.LENGTH_SHORT).show();
+        }
+        rebuildUnder(() -> openWidget(col, row));
+    }
+
+    /** A setting the whole profile shares (the clock's style, say), changed from a widget's sheet. */
+    private void changeStyle(int col, int row, Runnable change) {
+        change.run();
+        rebuildUnder(() -> openWidget(col, row));
+    }
+
+    /** Redraws the screen under an open sheet: the sheet comes back in place, with the new values and colours. */
+    private void rebuildUnder(Runnable reopen) {
+        int y = sheetScroll == null ? 0 : sheetScroll.getScrollY();
+        quietSheet = true;
+        build();
+        reopen.run();
+        quietSheet = false;
+        ScrollView sv = sheetScroll;
+        if (sv != null) sv.post(() -> sv.scrollTo(0, y));
+    }
+
+    private void caption(LinearLayout list, String s) {
+        TextView t = text(th.dim, 13);
+        t.setText(s);
+        list.addView(t, margins(-1, -2, 4, 2, 0, 6));
+    }
+
+    /** One of a few: a captioned row of pills that scrolls sideways when they don't fit. */
+    private void choice(LinearLayout list, String label, String[][] options, String current, java.util.function.Consumer<String> pick) {
+        caption(list, label);
+        LinearLayout row = new LinearLayout(ctx);
+        for (String[] o : options) {
+            boolean sel = o[0].equals(current);
+            row.addView(Ui.pill(ctx, o[1], sel ? th.accent : groupColor(), sel ? DashTheme.onColor(th.accent) : th.text, v -> {
+                if (!sel) pick.accept(o[0]);
+            }), margins(-2, -2, 0, 0, 6, 0));
+        }
+        HorizontalScrollView hs = new HorizontalScrollView(ctx);
+        hs.setHorizontalScrollBarEnabled(false);
+        hs.addView(row);
+        list.addView(hs, margins(-1, -2, 0, 0, 0, 12));
+    }
+
+    /** A row with a switch. */
+    private void setting(LinearLayout list, String label, boolean on, java.util.function.Consumer<Boolean> change) {
+        LinearLayout g = group(list);
+        LinearLayout r = new LinearLayout(ctx);
+        r.setGravity(Gravity.CENTER_VERTICAL);
+        r.setPadding(px(16), px(9), px(12), px(9));
+        TextView t = text(th.text, 16);
+        t.setText(label);
+        r.addView(t, new LinearLayout.LayoutParams(0, -2, 1));
+        Ui.Switch sw = new Ui.Switch(ctx, th, on);
+        sw.setListener(change::accept);
+        r.addView(sw);
+        g.addView(r, new LinearLayout.LayoutParams(-1, -2));
+    }
+
+    /** A field in a sheet; OK hands over what was typed. */
+    private void askText(String title, String value, java.util.function.Consumer<String> done) {
+        LinearLayout m = menu(title);
+        EditText field = new EditText(ctx);
+        field.setText(value);
+        field.setTextColor(th.text);
+        field.setSingleLine();
+        field.setInputType(InputType.TYPE_CLASS_TEXT | InputType.TYPE_TEXT_FLAG_CAP_SENTENCES);
+        field.setBackground(rounded(groupColor(), Ui.R_GROUP));
+        field.setPadding(px(16), px(12), px(16), px(12));
+        field.setSelection(field.getText().length());
+        m.addView(field, margins(-1, -2, 0, 0, 0, 10));
+        m.addView(Ui.pill(ctx, "Готово", th.accent, DashTheme.onColor(th.accent), v -> {
+            closeSheet();
+            done.accept(field.getText().toString().trim());
+        }));
+        openSheet(m);
+    }
+
+    /** Loads everything the smart home knows and lets the user tick what goes into a block. */
+    private void pickDevices(int col, int row) {
+        if (!SmartHome.configured(prefs)) {
+            Toast.makeText(ctx, "Сначала подключи умный дом в настройках", Toast.LENGTH_LONG).show();
+            host.open(SettingsActivity.class);
+            return;
+        }
+        Toast.makeText(ctx, "Загружаю устройства…", Toast.LENGTH_SHORT).show();
+        homeIo.execute(() -> {
+            StringBuilder errors = new StringBuilder();
+            List<HomeDevice> all = SmartHome.listAll(prefs, errors);
+            ui.post(() -> {
+                if (errors.length() > 0) Toast.makeText(ctx, errors.toString().trim(), Toast.LENGTH_LONG).show();
+                if (editing && !all.isEmpty()) showDevices(col, row, all);
+            });
+        });
+    }
+
+    private void showDevices(int col, int row, List<HomeDevice> all) {
+        JSONObject b = Desks.load(prefs).optJSONObject(curDesk).optJSONArray("cols").optJSONObject(col).optJSONArray("blocks").optJSONObject(row);
+        if (b == null) return;
+        // what is on the block keeps its order, and stays even when it is offline right now
+        Map<String, String> chosen = new java.util.LinkedHashMap<>();
+        for (String[] it : Desks.items(b)) chosen.put(it[0], it[1]);
+        LinearLayout m = vertical();
+        LinearLayout head = new LinearLayout(ctx);
+        head.setGravity(Gravity.CENTER_VERTICAL);
+        TextView t = text(th.text, 22);
+        t.setText("Что показывать");
+        t.setTypeface(Ui.font(700));
+        head.addView(t, new LinearLayout.LayoutParams(0, -2, 1));
+        head.addView(Ui.pill(ctx, "Готово", th.accent, DashTheme.onColor(th.accent), v -> {
+            closeSheet();
+            changeBlock(col, row, x -> {
+                JSONArray items = new JSONArray();
+                for (Map.Entry<String, String> e : chosen.entrySet()) items.put(new JSONObject().put("id", e.getKey()).put("n", e.getValue()));
+                x.put("items", items);
+            });
+        }));
+        m.addView(head, margins(-1, -2, 4, 0, 0, 14));
+        List<HomeDevice> sorted = new ArrayList<>(all);
+        sorted.sort((a, c) -> a.room.equals(c.room) ? a.name.compareToIgnoreCase(c.name) : a.room.compareToIgnoreCase(c.room));
+        for (HomeDevice d : sorted) {
+            LinearLayout g = group(m);
+            LinearLayout r = new LinearLayout(ctx);
+            r.setGravity(Gravity.CENTER_VERTICAL);
+            r.setPadding(px(16), px(10), px(16), px(10));
+            LinearLayout words = vertical();
+            TextView n = text(th.text, 16);
+            n.setText(d.name);
+            words.addView(n);
+            TextView w = text(th.dim, 12);
+            w.setText((d.room.isEmpty() ? "" : d.room + " · ") + ("ha".equals(d.source) ? "Home Assistant" : "Яндекс"));
+            words.addView(w);
+            r.addView(words, new LinearLayout.LayoutParams(0, -2, 1));
+            TextView ck = text(th.accent, 17);
+            ck.setTypeface(Ui.font(700));
+            ck.setText(chosen.containsKey(d.id) ? "✓" : "");
+            r.addView(ck);
+            r.setOnClickListener(v -> {
+                if (chosen.remove(d.id) == null) chosen.put(d.id, d.name);
+                ck.setText(chosen.containsKey(d.id) ? "✓" : "");
+            });
+            g.addView(r, new LinearLayout.LayoutParams(-1, -2));
+        }
+        openSheet(m);
+    }
+
+    /** All the desks: switch, add, rename, move, delete, or start over from a ready-made set. */
+    private void openDesks() {
+        LinearLayout m = menu("Столы");
+        JSONArray desks = Desks.load(prefs);
+        for (int i = 0; i < desks.length(); i++) {
+            int idx = i;
+            menuRow(m, desks.optJSONObject(i).optString("name", "Стол " + (i + 1)), i == curDesk, () -> {
+                closeSheet();
+                prefs.setDeskIndex(idx);
+                build();
+            });
+        }
+        menuRow(m, "+ Новый стол", false, () -> {
+            closeSheet();
+            changeDesks(d -> d.put(Desks.newDesk("Стол " + (d.length() + 1))));
+            prefs.setDeskIndex(Desks.load(prefs).length() - 1);
+            build();
+        });
+        String name = desks.optJSONObject(curDesk).optString("name");
+        caption(m, "Этот стол: " + name);
+        menuRow(m, "Переименовать…", false, () -> askText("Название стола", name, s -> changeDesks(d -> d.getJSONObject(curDesk).put("name", s))));
+        if (curDesk > 0) menuRow(m, "Поставить раньше", false, () -> moveDesk(-1));
+        if (curDesk < desks.length() - 1) menuRow(m, "Поставить позже", false, () -> moveDesk(1));
+        if (desks.length() > 1) {
+            menuRow(m, "Удалить стол", false, () -> {
+                closeSheet();
+                changeDesks(d -> {
+                    List<Object> l = Desks.toList(d);
+                    l.remove(curDesk);
+                    Desks.replace(d, l);
+                });
+            });
+        }
+        caption(m, "Заменить столы готовым набором");
+        for (Presets.Preset p : Presets.ALL) {
+            menuRow(m, p.name, p.about, false, () -> {
+                closeSheet();
+                changeDesks(d -> Desks.replace(d, Desks.toList(p.desks())));
+                prefs.setDeskIndex(0);
                 build();
             });
         }
         openSheet(m);
     }
 
-    private void startEditing() {
-        if (!"bento".equals(look) || nightActive) {
-            Toast.makeText(ctx, "Стол меняется в виде «Виджеты»: ⋮ → «Вид»", Toast.LENGTH_SHORT).show();
-            return;
-        }
-        editing = true;
+    private void moveDesk(int dir) {
+        closeSheet();
+        int to = curDesk + dir;
+        changeDesks(d -> {
+            List<Object> l = Desks.toList(d);
+            l.add(to, l.remove(curDesk));
+            Desks.replace(d, l);
+        });
+        prefs.setDeskIndex(to);
         build();
+    }
+
+    /** Look, theme, accent, wallpaper and clock in one sheet at the side: the desk changes behind it as you tap. */
+    private void openStyle() {
+        LinearLayout m = menu("Оформление");
+        choice(m, "Вид экрана", LOOKS, prefs.uiStyle(), id -> restyle(() -> {
+            prefs.setUiStyle(id);
+            peeking = false;
+        }));
+        themes(m, "Тёмные темы", false);
+        themes(m, "Светлые темы", true);
+
+        caption(m, "Акцент");
+        LinearLayout acc = new LinearLayout(ctx);
+        acc.addView(round(DashTheme.byId(prefs.theme()).accent, "А", prefs.accent() == 0, () -> prefs.raw().edit().putInt("accent", 0).apply()), margins(-2, -2, 0, 0, 8, 0));
+        for (int c : Ui.ACCENTS) {
+            acc.addView(round(c, "", c == prefs.accent(), () -> prefs.raw().edit().putInt("accent", c).apply()), margins(-2, -2, 0, 0, 8, 0));
+        }
+        HorizontalScrollView ha = new HorizontalScrollView(ctx);
+        ha.setHorizontalScrollBarEnabled(false);
+        ha.addView(acc);
+        m.addView(ha, margins(-1, -2, 0, 0, 0, 12));
+
+        choice(m, "Обои", DashTheme.WALLPAPERS, prefs.wallpaper(), id -> restyle(() -> prefs.raw().edit().putString("wallpaper", id).apply()));
+        choice(m, "Часы", FancyClock.STYLES, prefs.clockStyle(), id -> restyle(() -> prefs.setClockStyle(id)));
+        openSheet(m, Gravity.END);
+    }
+
+    private void restyle(Runnable change) {
+        change.run();
+        rebuildUnder(this::openStyle);
+    }
+
+    /** A captioned grid of themes, each a tiny screen in its own colours. */
+    private void themes(LinearLayout list, String label, boolean light) {
+        caption(list, label);
+        List<DashTheme> all = DashTheme.choices(light);
+        String cur = prefs.theme();
+        int perRow = 4;
+        for (int i = 0; i < all.size(); i += perRow) {
+            LinearLayout row = new LinearLayout(ctx);
+            for (int k = 0; k < perRow; k++) {
+                LinearLayout.LayoutParams cl = new LinearLayout.LayoutParams(0, -2, 1);
+                cl.setMargins(px(3), 0, px(3), px(8));
+                if (i + k >= all.size()) {
+                    row.addView(new View(ctx), cl);
+                    continue;
+                }
+                DashTheme t = all.get(i + k);
+                boolean sel = t.id.equals(cur);
+                LinearLayout cell = vertical();
+                cell.setGravity(Gravity.CENTER_HORIZONTAL);
+                Presets.ThemeChip chip = new Presets.ThemeChip(ctx, t, sel ? th.accent : th.line, sel);
+                cell.addView(chip, new LinearLayout.LayoutParams(-1, px(46)));
+                TextView n = text(sel ? th.text : th.dim, 12);
+                n.setText(t.name);
+                n.setSingleLine();
+                n.setEllipsize(TextUtils.TruncateAt.END);
+                cell.addView(n, margins(-2, -2, 0, 3, 0, 0));
+                cell.setOnClickListener(v -> {
+                    if (!sel) restyle(() -> prefs.setTheme(t.id));
+                });
+                row.addView(cell, cl);
+            }
+            list.addView(row, new LinearLayout.LayoutParams(-1, -2));
+        }
+    }
+
+    /** A round colour sample. */
+    private View round(int color, String label, boolean selected, Runnable change) {
+        TextView v = text(DashTheme.onColor(color), 13);
+        v.setTypeface(Ui.font(700));
+        v.setText(label);
+        v.setGravity(Gravity.CENTER);
+        GradientDrawable g = new GradientDrawable();
+        g.setShape(GradientDrawable.OVAL);
+        g.setColor(color);
+        g.setStroke(px(selected ? 3 : 1), selected ? th.text : th.line);
+        v.setBackground(g);
+        v.setLayoutParams(new LinearLayout.LayoutParams(px(36), px(36)));
+        v.setMinWidth(px(36));
+        v.setMinHeight(px(36));
+        v.setOnClickListener(x -> {
+            if (!selected) restyle(change);
+        });
+        return v;
+    }
+
+    /** A widget's card by its "Фон" setting; 0 is no card at all. */
+    private int cardColor(int card, String bg) {
+        switch (bg) {
+            case "clear": return 0;
+            case "tint": return DashTheme.blend(th.surface, th.accent, 0.28f);
+            default: return card;
+        }
     }
 
     private View card(View v, int color, boolean fill) {
@@ -724,6 +1315,11 @@ public class DashboardView extends FrameLayout {
         homePanels.clear();
         hOwners.clear();
         weatherPanels.clear();
+        sheetWeather = null;
+        editCols.clear();
+        for (android.animation.Animator a : wobbles) a.cancel();
+        wobbles.clear();
+        dropMark = null;
         weatherLine = null;
         dockTime = null;
         ribbon = null;
@@ -746,8 +1342,12 @@ public class DashboardView extends FrameLayout {
             case "home": return buildHome(b);
             case "calls": return buildCalls();
             case "stats": return buildStats();
-            case "weather": return buildWeather();
-            case "photos": return new PhotoFrame(ctx, th, prefs);
+            case "weather": return buildWeather(b);
+            case "photos": {
+                PhotoFrame pf = new PhotoFrame(ctx, th, prefs);
+                pf.every(b.optInt("every", 20));
+                return pf;
+            }
             case "messages": {
                 MessagesPanel mp = new MessagesPanel(ctx, th, new MessagesPanel.Listener() {
                     @Override
@@ -873,7 +1473,8 @@ public class DashboardView extends FrameLayout {
 
             @Override
             public void onLongPress(MotionEvent e) {
-                openSettings();
+                // on a desk a long press anywhere starts editing it
+                if (!deskSwipe) openSettings();
             }
         });
         clockBox.setOnTouchListener((v, e) -> gd.onTouchEvent(e));
@@ -2906,7 +3507,12 @@ public class DashboardView extends FrameLayout {
 
             @Override
             public void onSetup() {
-                host.open(SmartHome.configured(prefs) ? DeskEditorActivity.class : SettingsActivity.class);
+                if (!SmartHome.configured(prefs)) {
+                    host.open(SettingsActivity.class);
+                    return;
+                }
+                startEditing();
+                Toast.makeText(ctx, "Нажми на виджет, чтобы выбрать устройства", Toast.LENGTH_LONG).show();
             }
 
             @Override
@@ -3492,10 +4098,16 @@ public class DashboardView extends FrameLayout {
     // ---------------------------------------------------------------- sheet (detail cards and menus)
 
     private void openSheet(View body) {
+        openSheet(body, Gravity.CENTER);
+    }
+
+    /** side: START or END keeps the sheet off the middle and the desk bright, to watch a change happen on it. */
+    private void openSheet(View body, int side) {
         if (sheet != null) removeView(sheet);
-        performHapticFeedback(HapticFeedbackConstants.VIRTUAL_KEY);
+        if (!quietSheet) performHapticFeedback(HapticFeedbackConstants.VIRTUAL_KEY);
         sheet = new FrameLayout(ctx);
-        sheet.setBackgroundColor(0x80000000);
+        sheet.setBackgroundColor(side == Gravity.CENTER ? 0x80000000 : 0x26000000);
+        sheet.setElevation(20 * dp); // over the bar of the editing screen
         sheet.setOnClickListener(v -> closeSheet());
 
         ScrollView sv = new ScrollView(ctx);
@@ -3505,14 +4117,17 @@ public class DashboardView extends FrameLayout {
         sv.setBackground(rounded(sheetColor(), 30));
         sv.setElevation(16 * dp);
         sv.addView(body);
+        sheetScroll = sv;
 
         int w = Math.min(px(420), (int) (getWidth() * 0.6f));
-        FrameLayout.LayoutParams lp = new FrameLayout.LayoutParams(w, -2, Gravity.CENTER);
-        lp.setMargins(0, px(16) + cutT, 0, px(16) + cutB);
+        FrameLayout.LayoutParams lp = new FrameLayout.LayoutParams(w, -2, side | Gravity.CENTER_VERTICAL);
+        lp.setMargins(side == Gravity.CENTER ? 0 : px(16) + cutL, px(16) + cutT, side == Gravity.CENTER ? 0 : px(16) + cutR, px(16) + cutB);
         sheet.addView(sv, lp);
-        sheet.setAlpha(0f);
         addView(sheet, new LayoutParams(-1, -1));
-        sheet.animate().alpha(1f).setDuration(160).start();
+        if (!quietSheet) {
+            sheet.setAlpha(0f);
+            sheet.animate().alpha(1f).setDuration(160).start();
+        }
         ui.removeCallbacks(autoCloseSheet);
         ui.postDelayed(autoCloseSheet, 30_000);
     }
@@ -3521,6 +4136,7 @@ public class DashboardView extends FrameLayout {
 
     private void closeSheet() {
         ui.removeCallbacks(autoCloseSheet);
+        sheetWeather = null;
         if (sheet == null) return;
         View s = sheet;
         sheet = null;
@@ -3564,13 +4180,25 @@ public class DashboardView extends FrameLayout {
     }
 
     private void menuRow(LinearLayout list, String label, boolean selected, Runnable action) {
+        menuRow(list, label, null, selected, action);
+    }
+
+    /** sub: a quiet line under the label, or null. */
+    private void menuRow(LinearLayout list, String label, String sub, boolean selected, Runnable action) {
         LinearLayout g = group(list);
         LinearLayout r = new LinearLayout(ctx);
         r.setGravity(Gravity.CENTER_VERTICAL);
-        r.setPadding(px(16), px(13), px(16), px(13));
+        r.setPadding(px(16), px(sub == null ? 13 : 9), px(16), px(sub == null ? 13 : 9));
+        LinearLayout words = vertical();
         TextView t = text(th.text, 16);
         t.setText(label);
-        r.addView(t, new LinearLayout.LayoutParams(0, -2, 1));
+        words.addView(t);
+        if (sub != null) {
+            TextView s = text(th.dim, 12);
+            s.setText(sub);
+            words.addView(s);
+        }
+        r.addView(words, new LinearLayout.LayoutParams(0, -2, 1));
         if (selected) {
             TextView ck = text(th.accent, 17);
             ck.setText("✓");
@@ -3599,14 +4227,10 @@ public class DashboardView extends FrameLayout {
         if (Weather.configured(prefs)) menuRow(m, "Погода", false, this::openWeatherSheet);
         Modes.Mode cur = activeMode();
         menuRow(m, "Режим: " + (cur == null ? "нет" : cur.name) + "…", false, this::openModes);
-        menuRow(m, "Вид: " + lookName(prefs.uiStyle()) + "…", false, this::openLooks);
-        menuRow(m, "Изменить этот стол", false, () -> {
+        menuRow(m, "Оформление…", false, this::openStyle);
+        menuRow(m, "Изменить виджеты", false, () -> {
             closeSheet();
             startEditing();
-        });
-        menuRow(m, "Столы и блоки…", false, () -> {
-            closeSheet();
-            host.open(DeskEditorActivity.class);
         });
         List<Profiles.Profile> ps = Profiles.list(ctx);
         if (ps.size() > 1) menuRow(m, "Профиль: " + Profiles.name(ctx, Profiles.active(ctx)) + "…", false, this::openProfiles);
@@ -3750,16 +4374,18 @@ public class DashboardView extends FrameLayout {
 
     // ---------------------------------------------------------------- weather
 
-    private View buildWeather() {
-        return buildWeather(false);
+    /** The widget by its settings: any background but the sky makes it a plain block on the theme's colours. */
+    private View buildWeather(JSONObject b) {
+        WeatherPanel p = buildWeather(!b.optString("bg").isEmpty());
+        p.show(b.optBoolean("hours", true), b.optBoolean("week", true), b.optInt("days", 7));
+        return p;
     }
 
-    private View buildWeather(boolean flat) {
+    private WeatherPanel buildWeather(boolean flat) {
         WeatherPanel p = new WeatherPanel(ctx, th, nightActive, new WeatherPanel.Listener() {
             @Override
             public void onTap() {
-                weatherTryAt = 0;
-                fetchWeather(true);
+                openWeatherSheet();
             }
 
             @Override
@@ -3849,6 +4475,7 @@ public class DashboardView extends FrameLayout {
         String indoor = indoorText(out);
         sensorSig = outT + indoor;
         for (WeatherPanel p : weatherPanels) p.render(w, place, outT, indoor);
+        if (sheetWeather != null) sheetWeather.render(w, place, outT, indoor);
         if (weatherLine != null) {
             if (w == null || Double.isNaN(w.temp)) {
                 weatherLine.setVisibility(GONE);
@@ -3880,9 +4507,11 @@ public class DashboardView extends FrameLayout {
                 openSettings();
             }
         });
+        p.weekRows();
         HomeDevice out = outdoorSensor();
         p.render(weather, Weather.place(prefs), out == null ? Double.NaN : out.temperature(), indoorText(out));
         openSheet(p);
+        sheetWeather = p;
         fetchWeather(false);
     }
 
@@ -3895,20 +4524,6 @@ public class DashboardView extends FrameLayout {
     static String lookName(String id) {
         for (String[] l : LOOKS) if (l[0].equals(id)) return l[1];
         return LOOKS[0][1];
-    }
-
-    private void openLooks() {
-        LinearLayout m = menu("Вид экрана");
-        String cur = prefs.uiStyle();
-        for (String[] l : LOOKS) {
-            menuRow(m, l[1], l[0].equals(cur), () -> {
-                closeSheet();
-                prefs.setUiStyle(l[0]);
-                peeking = false;
-                build();
-            });
-        }
-        openSheet(m);
     }
 
     /**
@@ -4281,9 +4896,41 @@ public class DashboardView extends FrameLayout {
         return phoneCall != null || pcc != null && !pcc.calls.isEmpty();
     }
 
+    /** A finger held still on a desk starts editing it, wherever it is; tiles with a long press of their own go first. */
+    private final Runnable deskLongPress = () -> {
+        if (!deskSwipe || editing || nightActive || sheet != null || picker != null || !hasWindowFocus()) return;
+        performHapticFeedback(HapticFeedbackConstants.LONG_PRESS);
+        swallow = true;
+        startEditing();
+    };
+
+    private void watchLongPress(MotionEvent e) {
+        switch (e.getActionMasked()) {
+            case MotionEvent.ACTION_DOWN:
+                pressX = e.getX();
+                pressY = e.getY();
+                ui.removeCallbacks(deskLongPress);
+                if (sheet == null) {
+                    ui.postDelayed(deskLongPress, 650);
+                } else {
+                    // whoever is using a sheet keeps it open
+                    ui.removeCallbacks(autoCloseSheet);
+                    ui.postDelayed(autoCloseSheet, 30_000);
+                }
+                break;
+            case MotionEvent.ACTION_MOVE:
+                if (Math.hypot(e.getX() - pressX, e.getY() - pressY) > 12 * dp) ui.removeCallbacks(deskLongPress);
+                break;
+            default:
+                ui.removeCallbacks(deskLongPress);
+                break;
+        }
+    }
+
     /** Touches: remember the time (for the always-on screen); the first touch of the always-on or night screen only wakes it. */
     @Override
     public boolean dispatchTouchEvent(MotionEvent e) {
+        watchLongPress(e);
         if (e.getActionMasked() == MotionEvent.ACTION_DOWN) {
             lastTouch = SystemClock.elapsedRealtime();
             if ("aod".equals(look) || "night".equals(look) && !peeking) {
@@ -4326,7 +4973,7 @@ public class DashboardView extends FrameLayout {
             return true;
         });
         rail.addView(dockTime, margins(-2, -2, 0, 0, 0, 8));
-        String page = prefs.dockPage();
+        String page = editing ? "main" : prefs.dockPage();
         List<Object[]> pages = new ArrayList<>();
         for (Object[] pg : DOCK) {
             if ("home".equals(pg[0]) && !SmartHome.configured(prefs)) continue;
@@ -4351,6 +4998,11 @@ public class DashboardView extends FrameLayout {
             item.addView(l, margins(-2, -2, 0, 2, 0, 0));
             String id = (String) pg[0];
             item.setOnClickListener(v -> {
+                if (editing) {
+                    prefs.setDockPage(id);
+                    finishEditing();
+                    return;
+                }
                 if (id.equals(prefs.dockPage())) return;
                 performHapticFeedback(HapticFeedbackConstants.VIRTUAL_KEY);
                 prefs.setDockPage(id);
@@ -4384,7 +5036,7 @@ public class DashboardView extends FrameLayout {
         content.addView(area, al);
         deskSwipe = "main".equals(page);
         if (deskSwipe) {
-            buildDesk(area, desk, portrait, used, false);
+            buildDesk(area, desk, portrait, used, editing);
             return;
         }
         used.add("clock"); // the rail has ⋮: no bar needed
@@ -4415,9 +5067,12 @@ public class DashboardView extends FrameLayout {
                 area.addView(side, sl);
                 break;
             }
-            case "weather":
-                area.addView(buildWeather(), new LinearLayout.LayoutParams(-1, -1));
+            case "weather": {
+                WeatherPanel wp = buildWeather(false);
+                wp.wide();
+                area.addView(wp, new LinearLayout.LayoutParams(-1, -1));
                 break;
+            }
             case "music": {
                 LinearLayout col = vertical();
                 col.setGravity(Gravity.CENTER_VERTICAL);
@@ -4748,7 +5403,7 @@ public class DashboardView extends FrameLayout {
         int base = "bento".equals(look) || "dock".equals(look) ? px(14) : px(22);
         // the live strip takes the top edge: blocks move down instead of hiding under it
         int top = live != null && live.getVisibility() == VISIBLE ? px(50) : px(16);
-        content.setPadding(base + cutL, top + cutT, base + cutR, (hasBar ? px(34) : px(16)) + cutB);
+        content.setPadding(base + cutL, top + cutT, base + cutR, (editing ? px(60) : hasBar ? px(34) : px(16)) + cutB);
     }
 
     private int px(float v) {

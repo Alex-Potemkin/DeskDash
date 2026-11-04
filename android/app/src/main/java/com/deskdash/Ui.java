@@ -33,6 +33,8 @@ final class Ui {
     static final int[] TILES = {BLUE, ORANGE, GREEN, PINK, INDIGO, TEAL, PURPLE, RED, BROWN, MINT};
 
     static final Locale RU = new Locale("ru");
+    /** The colours offered as an accent over the theme's. */
+    static final int[] ACCENTS = {BLUE, INDIGO, PURPLE, PINK, RED, ORANGE, YELLOW, GREEN, MINT, TEAL, BROWN};
 
     private Ui() {}
 

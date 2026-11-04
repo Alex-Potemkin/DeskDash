@@ -13,7 +13,7 @@ import org.json.JSONObject;
 
 /**
  * Ready-made dashboards offered on the first start and in Settings → «Готовые варианты»: a set of
- * desks plus a theme and clock to go with them. Everything stays editable in «Столы и блоки».
+ * desks plus a theme and clock to go with them. Everything stays editable on the screen.
  */
 final class Presets {
     static final class Preset {
@@ -97,7 +97,7 @@ final class Presets {
             case "home":
                 return new JSONArray()
                         .put(desk("Дом",
-                                Desks.column(36, b("clock", 1), b("weather", 0), b("music", 0)),
+                                Desks.column(36, b("clock", 1), b("weather", 0).put("hours", false), b("music", 0)),
                                 Desks.column(64, home("Комнаты", 1))))
                         .put(desk("День",
                                 Desks.column(50, b("clock", 1), b("calls", 1)),
@@ -107,7 +107,7 @@ final class Presets {
             case "bedside":
                 return new JSONArray().put(desk("Спальня",
                         Desks.column(55, b("clock", 2), home("Свет", 1)),
-                        Desks.column(45, b("weather", 0), b("calendar", 1))));
+                        Desks.column(45, b("weather", 0).put("hours", false), b("calendar", 1))));
             default:
                 return Desks.defaults();
         }
@@ -269,6 +269,41 @@ final class Presets {
                 p.setColor(col);
                 c.drawRect(l, y, l + 1.5f * d, y + 7 * d, p);
             }
+        }
+    }
+
+    /** A theme as a tiny screen: its background, a card with a line of text, and the accent. */
+    static final class ThemeChip extends View {
+        private final Paint p = new Paint(Paint.ANTI_ALIAS_FLAG);
+        private final DashTheme t;
+        private final int ring;
+        private final boolean selected;
+
+        ThemeChip(Context c, DashTheme theme, int ring, boolean selected) {
+            super(c);
+            t = theme;
+            this.ring = ring;
+            this.selected = selected;
+        }
+
+        @Override
+        protected void onDraw(Canvas c) {
+            float d = getResources().getDisplayMetrics().density, w = getWidth(), h = getHeight(), st = (selected ? 2.5f : 1) * d, r = 10 * d;
+            p.setStyle(Paint.Style.FILL);
+            p.setColor(t.bg);
+            c.drawRoundRect(st / 2, st / 2, w - st / 2, h - st / 2, r, r, p);
+            p.setColor(t.surface);
+            c.drawRoundRect(7 * d, 7 * d, w * 0.62f, h - 7 * d, 5 * d, 5 * d, p);
+            p.setColor(t.text);
+            c.drawRoundRect(11 * d, 12 * d, w * 0.5f, 15 * d, d, d, p);
+            p.setColor(t.dim);
+            c.drawRoundRect(11 * d, 19 * d, w * 0.4f, 22 * d, d, d, p);
+            p.setColor(t.accent);
+            c.drawCircle(w * 0.8f, h / 2, Math.min(w, h) * 0.17f, p);
+            p.setStyle(Paint.Style.STROKE);
+            p.setStrokeWidth(st);
+            p.setColor(ring);
+            c.drawRoundRect(st / 2, st / 2, w - st / 2, h - st / 2, r, r, p);
         }
     }
 

@@ -313,7 +313,7 @@ final class Setup {
                     for (int i = 0; i < list.size(); i++) if (list.get(i).serial.equals(c.serial)) list.remove(i--);
                     list.add(c);
                     Bambu.save(p, list);
-                    toast(a, "Принтер «" + c.name + "» добавлен. Плитка — в «Столы и блоки» → «Умный дом» → «Устройства…»");
+                    toast(a, "Принтер «" + c.name + "» добавлен. Плитка: подержи палец на столе, тап по виджету «Умный дом» → «Устройства»");
                     if (done != null) done.run();
                 })
                 .setNegativeButton("Отмена", null).show();

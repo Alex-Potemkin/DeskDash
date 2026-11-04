@@ -22,8 +22,9 @@ import java.util.Locale;
 
 /**
  * The "Погода" block, like Apple's Weather widget: the sky of the moment as its background (blue by day,
- * deep blue at night, grey under clouds), white text, now, the next hours and the next days. At night the
- * dashboard's dim palette is kept instead. When the block is short only the first row fits.
+ * deep blue at night, grey under clouds), white text, now, the next hours and the week. At night the
+ * dashboard's dim palette is kept instead. The week is a strip of days on a widget, and rows with a temperature
+ * bar in the sheet and on the dock's page; a tap on a row opens that day. A short block drops the hours, then the week.
  */
 final class WeatherPanel extends LinearLayout {
     interface Listener {
@@ -35,7 +36,9 @@ final class WeatherPanel extends LinearLayout {
     private DashTheme th;
     private final float dp;
     private final boolean night, sky;
-    private boolean compact;
+    private boolean compact, weekRows, wide, hasData;
+    private boolean showHours = true, showWeek = true;
+    private int weekDays = 7;
     private final Icon icon;
     private final TextView temp, cond, more, empty;
     private final LinearLayout hours, days, now;
@@ -114,6 +117,60 @@ final class WeatherPanel extends LinearLayout {
         return hourScroll;
     }
 
+    /** What the widget shows, from its settings. */
+    void show(boolean hours, boolean week, int nDays) {
+        showHours = hours;
+        showWeek = week;
+        weekDays = nDays;
+    }
+
+    /** The week as rows you can open, not a strip: for the sheet, which scrolls. */
+    void weekRows() {
+        weekRows = true;
+    }
+
+    /** A whole screen (the dock's page): now and the hours on the left, the week on the right. */
+    void wide() {
+        wide = weekRows = true;
+        removeAllViews();
+        setOrientation(HORIZONTAL);
+        setGravity(Gravity.CENTER_VERTICAL);
+        LinearLayout left = new LinearLayout(getContext());
+        left.setOrientation(VERTICAL);
+        left.addView(now, new LayoutParams(-1, -2));
+        LayoutParams hl = new LayoutParams(-1, -2);
+        hl.topMargin = px(16);
+        left.addView(hourScroll, hl);
+        left.addView(empty, new LayoutParams(-1, -2));
+        addView(left, new LayoutParams(0, -2, 1));
+        LayoutParams dl = new LayoutParams(0, -2, 1);
+        dl.leftMargin = px(24);
+        addView(days, dl);
+    }
+
+    @Override
+    protected void onMeasure(int ws, int hs) {
+        if (!hasData || compact || wide) {
+            super.onMeasure(ws, hs);
+            return;
+        }
+        hourScroll.setVisibility(showHours ? VISIBLE : GONE);
+        days.setVisibility(showWeek ? VISIBLE : GONE);
+        int mode = MeasureSpec.getMode(hs);
+        if (mode != MeasureSpec.UNSPECIFIED) {
+            // "as tall as its content" must not eat the whole column: the blocks above and below need some of it
+            int room = mode == MeasureSpec.AT_MOST ? MeasureSpec.getSize(hs) * 7 / 10 : MeasureSpec.getSize(hs);
+            int free = MeasureSpec.makeMeasureSpec(0, MeasureSpec.UNSPECIFIED);
+            super.onMeasure(ws, free);
+            if (getMeasuredHeight() > room && showHours) {
+                hourScroll.setVisibility(GONE);
+                super.onMeasure(ws, free);
+            }
+            if (getMeasuredHeight() > room) days.setVisibility(GONE);
+        }
+        super.onMeasure(ws, hs);
+    }
+
     /** Only the "now" row: for the top of the day ribbon and other tight places. */
     void compact() {
         compact = true;
@@ -157,10 +214,11 @@ final class WeatherPanel extends LinearLayout {
     /** outT: the outdoor sensor's temperature (NaN: the forecast's); indoor: "Дома 22,4° · 41 %" or "". */
     void render(Weather w, String place, double outT, String indoor) {
         boolean has = w != null && !Double.isNaN(w.temp);
+        hasData = has;
         empty.setVisibility(has ? GONE : VISIBLE);
         now.setVisibility(has ? VISIBLE : GONE);
-        hourScroll.setVisibility(has && !compact ? VISIBLE : GONE);
-        days.setVisibility(has && !compact ? VISIBLE : GONE);
+        hourScroll.setVisibility(has && !compact && showHours ? VISIBLE : GONE);
+        days.setVisibility(has && !compact && showWeek ? VISIBLE : GONE);
         if (!has) {
             if (w != null || !place.isEmpty()) empty.setText("Погода: нет связи\n" + place);
             return;
@@ -190,7 +248,7 @@ final class WeatherPanel extends LinearLayout {
             TextView t = text(sky ? 0xD9FFFFFF : th.dim, 12);
             t.setTypeface(Ui.font(500));
             t.setText(Weather.hour(h.time));
-            cell.addView(t);
+            cell.addView(centered(t));
             Icon ic = new Icon(getContext(), th, night);
             ic.set(h.code, w.dayAt(h.time + 1_800_000L));
             LayoutParams il = new LayoutParams(px(26), px(26));
@@ -199,49 +257,226 @@ final class WeatherPanel extends LinearLayout {
             TextView v = text(th.text, 14);
             v.setTypeface(Ui.font(600));
             v.setText(Weather.deg(h.temp));
-            cell.addView(v);
+            cell.addView(centered(v));
             if (h.rain >= 30 && Weather.wet(h.code)) {
                 TextView r = text(sky ? 0xFF9ED8FF : th.dim, 11);
                 r.setText(h.rain + "%");
-                cell.addView(r);
+                cell.addView(centered(r));
             }
+            // the strip scrolls and keeps taps to itself; on a cell a tap still reaches the widget
+            cell.setOnClickListener(x -> performClick());
             LayoutParams cl = new LayoutParams(px(46), -2);
             hours.addView(cell, cl);
         }
 
         days.removeAllViews();
+        List<Weather.Day> week = w.week(weekDays);
+        if (weekRows) weekList(w, week, outT);
+        else weekStrip(w, week);
+    }
+
+    /** The widget's week: one narrow column per day, so seven days cost the height of one row. */
+    private void weekStrip(Weather w, List<Weather.Day> week) {
+        days.setOrientation(HORIZONTAL);
         LocalDate today = w.placeDate();
-        for (Weather.Day d : w.days) {
-            if (!d.date.isAfter(today) || days.getChildCount() >= 3) continue;
-            LinearLayout r = new LinearLayout(getContext());
-            r.setGravity(Gravity.CENTER_VERTICAL);
-            r.setPadding(px(2), px(6), px(2), px(6));
-            TextView n = text(th.text, 13);
-            String name = d.date.equals(today.plusDays(1)) ? "Завтра"
-                    : d.date.getDayOfWeek().getDisplayName(TextStyle.FULL_STANDALONE, Ui.RU);
-            n.setText(Character.toUpperCase(name.charAt(0)) + name.substring(1));
-            r.addView(n, new LayoutParams(0, -2, 1));
+        boolean wet = false;
+        for (Weather.Day d : week) wet |= d.rain >= 30;
+        for (Weather.Day d : week) {
+            LinearLayout cell = new LinearLayout(getContext());
+            cell.setOrientation(VERTICAL);
+            cell.setGravity(Gravity.CENTER_HORIZONTAL);
+            boolean first = d.date.equals(today);
+            TextView n = text(first ? th.text : muted(), 12);
+            n.setTypeface(Ui.font(first ? 700 : 500));
+            n.setText(first ? "Сег" : Ui.cap(d.date.getDayOfWeek().getDisplayName(TextStyle.SHORT_STANDALONE, Ui.RU)));
+            cell.addView(centered(n));
             Icon ic = new Icon(getContext(), th, night);
             ic.set(d.code, true);
-            r.addView(ic, new LayoutParams(px(22), px(22)));
-            TextView rain = text(th.dim, 11);
-            rain.setText(d.rain >= 30 ? "  " + d.rain + "%" : "");
-            rain.setMinWidth(px(38));
-            r.addView(rain);
-            TextView t = text(th.text, 13);
-            t.setText(Weather.deg(d.max) + "  ");
-            r.addView(t);
-            TextView lo = text(th.dim, 13);
+            LayoutParams il = new LayoutParams(px(24), px(24));
+            il.topMargin = px(2);
+            cell.addView(ic, il);
+            TextView hi = text(th.text, 14);
+            hi.setTypeface(Ui.font(600));
+            hi.setSingleLine();
+            hi.setText(Weather.deg(d.max));
+            cell.addView(centered(hi));
+            TextView lo = text(muted(), 12);
+            lo.setSingleLine();
             lo.setText(Weather.deg(d.min));
-            lo.setMinWidth(px(34));
-            r.addView(lo);
+            cell.addView(centered(lo));
+            if (wet) {
+                TextView r = text(sky ? 0xFF9ED8FF : th.dim, 11);
+                r.setSingleLine();
+                r.setText(d.rain >= 30 ? d.rain + "%" : " ");
+                cell.addView(centered(r));
+            }
+            days.addView(cell, new LayoutParams(0, -2, 1));
+        }
+    }
+
+    /** The week as rows: every day's range on one scale for the whole week, so warmer and colder days show at a glance. */
+    private void weekList(Weather w, List<Weather.Day> week, double outT) {
+        days.setOrientation(VERTICAL);
+        LocalDate today = w.placeDate();
+        double lo = Double.POSITIVE_INFINITY, hi = Double.NEGATIVE_INFINITY;
+        for (Weather.Day d : week) {
+            if (!Double.isNaN(d.min)) lo = Math.min(lo, d.min);
+            if (!Double.isNaN(d.max)) hi = Math.max(hi, d.max);
+        }
+        for (Weather.Day d : week) {
+            LinearLayout r = new LinearLayout(getContext());
+            r.setGravity(Gravity.CENTER_VERTICAL);
+            r.setPadding(px(2), px(7), px(2), px(7));
+            TextView n = text(th.text, 14);
+            n.setTypeface(Ui.font(d.date.equals(today) ? 700 : 400));
+            n.setSingleLine();
+            n.setEllipsize(TextUtils.TruncateAt.END);
+            n.setText(dayName(d, today));
+            r.addView(n, new LayoutParams(px(104), -2));
+            Icon ic = new Icon(getContext(), th, night);
+            ic.set(d.code, true);
+            r.addView(ic, new LayoutParams(px(24), px(24)));
+            TextView rain = text(sky ? 0xFF9ED8FF : th.dim, 11);
+            rain.setGravity(Gravity.CENTER);
+            rain.setText(d.rain >= 30 ? d.rain + "%" : "");
+            r.addView(rain, new LayoutParams(px(38), -2));
+            TextView min = text(muted(), 14);
+            min.setGravity(Gravity.END);
+            min.setText(Weather.deg(d.min));
+            r.addView(min, new LayoutParams(px(38), -2));
+            TempBar bar = new TempBar(getContext(), lo, hi, d.min, d.max,
+                    d.date.equals(today) ? Double.isNaN(outT) ? w.temp : outT : Double.NaN, sky ? 0x33FFFFFF : th.line, night ? th.accent : 0);
+            LayoutParams bl = new LayoutParams(0, px(6), 1);
+            bl.leftMargin = bl.rightMargin = px(8);
+            r.addView(bar, bl);
+            TextView max = text(th.text, 14);
+            max.setTypeface(Ui.font(600));
+            max.setText(Weather.deg(d.max));
+            r.addView(max, new LayoutParams(px(38), -2));
             if (days.getChildCount() > 0) {
                 View line = new View(getContext());
                 line.setBackgroundColor(sky ? 0x33FFFFFF : th.line);
                 days.addView(line, new LayoutParams(-1, Math.max(1, (int) (dp * 0.6f))));
             }
             days.addView(r, new LayoutParams(-1, -2));
+            LinearLayout more = dayDetails(w, d);
+            more.setVisibility(GONE);
+            days.addView(more, new LayoutParams(-1, -2));
+            r.setOnClickListener(v -> more.setVisibility(more.getVisibility() == VISIBLE ? GONE : VISIBLE));
         }
+    }
+
+    private static String dayName(Weather.Day d, LocalDate today) {
+        if (d.date.equals(today)) return "Сегодня";
+        if (d.date.equals(today.plusDays(1))) return "Завтра";
+        return Ui.cap(d.date.getDayOfWeek().getDisplayName(TextStyle.FULL_STANDALONE, Ui.RU));
+    }
+
+    /** An open day: its date, weather in words, sun and wind, and the day every three hours while the forecast has them. */
+    private LinearLayout dayDetails(Weather w, Weather.Day d) {
+        LinearLayout box = new LinearLayout(getContext());
+        box.setOrientation(VERTICAL);
+        box.setPadding(px(2), 0, px(2), px(10));
+        StringBuilder sb = new StringBuilder();
+        sb.append(d.date.format(java.time.format.DateTimeFormatter.ofPattern("d MMMM", Ui.RU))).append(" · ")
+                .append(Weather.text(d.code).toLowerCase(Ui.RU));
+        if (d.wind > 0) sb.append(" · ветер до ").append(Math.round(d.wind)).append(" м/с");
+        if (d.sunrise > 0) sb.append("\nВосход ").append(Weather.hour(d.sunrise)).append(" · закат ").append(Weather.hour(d.sunset));
+        TextView t = text(muted(), 13);
+        t.setLineSpacing(0, 1.15f);
+        t.setText(sb);
+        box.addView(t);
+        List<Weather.Hour> hs = w.hoursOf(d, 3);
+        if (hs.size() >= 4) {
+            LinearLayout row = new LinearLayout(getContext());
+            for (Weather.Hour h : hs) {
+                LinearLayout cell = new LinearLayout(getContext());
+                cell.setOrientation(VERTICAL);
+                cell.setGravity(Gravity.CENTER_HORIZONTAL);
+                TextView at = text(muted(), 11);
+                at.setSingleLine();
+                at.setText(Weather.hour(h.time));
+                cell.addView(centered(at));
+                Icon ic = new Icon(getContext(), th, night);
+                ic.set(h.code, w.dayAt(h.time + 1_800_000L));
+                cell.addView(ic, new LayoutParams(px(22), px(22)));
+                TextView v = text(th.text, 12);
+                v.setSingleLine();
+                v.setText(Weather.deg(h.temp));
+                cell.addView(centered(v));
+                row.addView(cell, new LayoutParams(0, -2, 1));
+            }
+            LayoutParams rl = new LayoutParams(-1, -2);
+            rl.topMargin = px(8);
+            box.addView(row, rl);
+        }
+        return box;
+    }
+
+    /** A line of a narrow column: as wide as the column, so its text sits over the icon. */
+    private static TextView centered(TextView t) {
+        t.setGravity(Gravity.CENTER_HORIZONTAL);
+        return t;
+    }
+
+    /** Secondary text: soft white on the sky, the theme's grey elsewhere. */
+    private int muted() {
+        return sky ? 0xD9FFFFFF : th.dim;
+    }
+
+    /** A day's range on the week's scale, blue for cold to orange for warm; a dot marks the temperature now. */
+    private static final class TempBar extends View {
+        private final Paint p = new Paint(Paint.ANTI_ALIAS_FLAG);
+        private final double lo, hi, min, max, now;
+        private final int track, flat;
+
+        TempBar(Context c, double lo, double hi, double min, double max, double now, int track, int flat) {
+            super(c);
+            this.lo = lo;
+            this.hi = hi;
+            this.min = min;
+            this.max = max;
+            this.now = now;
+            this.track = track;
+            this.flat = flat;
+        }
+
+        private float at(double t, float w) {
+            return hi <= lo ? w / 2 : (float) ((Math.max(lo, Math.min(hi, t)) - lo) / (hi - lo)) * w;
+        }
+
+        @Override
+        protected void onDraw(Canvas c) {
+            float w = getWidth(), h = getHeight(), r = h / 2;
+            p.setShader(null);
+            p.setColor(track);
+            c.drawRoundRect(0, 0, w, h, r, r, p);
+            if (Double.isNaN(min) || Double.isNaN(max)) return;
+            float a = at(min, w), b = Math.max(at(max, w), a + h);
+            if (b > w) {
+                a -= b - w;
+                b = w;
+            }
+            if (flat != 0) p.setColor(flat);
+            else p.setShader(new android.graphics.LinearGradient(a, 0, b, 0, tempColor(min), tempColor(max), android.graphics.Shader.TileMode.CLAMP));
+            c.drawRoundRect(a, 0, b, h, r, r, p);
+            p.setShader(null);
+            if (!Double.isNaN(now)) {
+                p.setColor(0xFFFFFFFF);
+                c.drawCircle(Math.max(r, Math.min(w - r, at(now, w))), r, r, p);
+            }
+        }
+    }
+
+    /** −15° and below is blue, about +5° green, +20° yellow, +30° and above orange-red. */
+    static int tempColor(double t) {
+        double[] at = {-15, -5, 5, 20, 30};
+        int[] col = {0xFF5E9BFF, 0xFF4CC9F0, 0xFF4CD08A, 0xFFFFD60A, 0xFFFF6B35};
+        if (t <= at[0]) return col[0];
+        for (int i = 1; i < at.length; i++) {
+            if (t <= at[i]) return DashTheme.blend(col[i - 1], col[i], (float) ((t - at[i - 1]) / (at[i] - at[i - 1])));
+        }
+        return col[col.length - 1];
     }
 
     /** The widget's background: a vertical gradient of the sky right now. */

@@ -12,7 +12,16 @@ import android.view.WindowInsetsController;
 import android.view.WindowManager;
 
 public class MainActivity extends Activity {
+    /** Open straight into editing the desk ("Изменить виджеты" in the settings). */
+    static final String EXTRA_EDIT = "edit";
+
     private DashboardView dash;
+
+    @Override
+    protected void onNewIntent(Intent intent) {
+        super.onNewIntent(intent);
+        if (intent.getBooleanExtra(EXTRA_EDIT, false)) dash.startEditing();
+    }
 
     @Override
     protected void onCreate(Bundle state) {
@@ -26,6 +35,7 @@ public class MainActivity extends Activity {
         }
         dash = new DashboardView(this, w, screen -> startActivity(new Intent(this, screen)));
         setContentView(dash);
+        if (getIntent().getBooleanExtra(EXTRA_EDIT, false)) dash.startEditing();
         if (Presets.needWelcome(this)) {
             // the wizard asks for the calendar itself, together with everything else
             startActivity(new Intent(this, WelcomeActivity.class));

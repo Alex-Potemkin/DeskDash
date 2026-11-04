@@ -25,7 +25,7 @@ import java.util.List;
  * with a slow crossfade and a gentle zoom, as the photo view of StandBy does.
  */
 final class PhotoFrame extends FrameLayout {
-    private static final long EVERY_MS = 20_000;
+    private long everyMs = 20_000;
 
     private final Prefs prefs;
     private final Handler ui = new Handler(Looper.getMainLooper());
@@ -92,6 +92,11 @@ final class PhotoFrame extends FrameLayout {
 
     private final Runnable tick = this::show;
 
+    /** How long a photo stays, from the widget's settings. */
+    void every(int seconds) {
+        everyMs = seconds * 1000L;
+    }
+
     private void show() {
         if (!live || photos.isEmpty()) return;
         String rel = photos.get(next++ % photos.size());
@@ -109,11 +114,11 @@ final class PhotoFrame extends FrameLayout {
                     in.setScaleY(1f);
                     in.animate().alpha(1f).setDuration(1500).start();
                     // a slow zoom while the photo is on screen
-                    in.animate().scaleX(1.08f).scaleY(1.08f).setDuration(EVERY_MS + 1500).start();
+                    in.animate().scaleX(1.08f).scaleY(1.08f).setDuration(everyMs + 1500).start();
                     out.animate().alpha(0f).setDuration(1500).start();
                     front = 1 - front;
                 }
-                ui.postDelayed(tick, EVERY_MS);
+                ui.postDelayed(tick, everyMs);
             });
         }).start();
     }

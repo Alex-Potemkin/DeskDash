@@ -15,13 +15,17 @@ import java.util.List;
  *     {"w": 47, "blocks": [{"t": "calendar", "h": 1}]}]}]
  * </pre>
  * "w" is the column's share of the width, "h" the block's share of the column height (0 = as tall as
- * its content). A "home" block also has "title" and "items": [{"id": "ha:light.kitchen", "n": "Кухня"}].
+ * its content). Any block may have "bg": "" (its usual background), "card", "tint" or "clear". A "home" block also has
+ * "title" and "items": [{"id": "ha:light.kitchen", "n": "Кухня"}], "weather" has "hours", "week" and "days", "photos" "every".
  */
 final class Desks {
     static final String[][] TYPES = {
-            {"clock", "Часы"}, {"calendar", "Календарь"}, {"music", "Музыка"},
-            {"pc", "Компьютер"}, {"home", "Умный дом"}, {"calls", "Созвоны"}, {"stats", "День"}, {"weather", "Погода"}, {"photos", "Фото"},
-            {"messages", "Сообщения"}, {"timers", "Таймеры"}, {"energy", "Энергия"},
+            {"clock", "Часы", "Время, дата и что дальше"}, {"calendar", "Календарь", "День или месяц с событиями"},
+            {"music", "Музыка", "Что играет, кнопки плеера"}, {"pc", "Компьютер", "Макросы и состояние ПК"},
+            {"home", "Умный дом", "Плитки устройств, какие выберешь"}, {"calls", "Созвоны", "Ближайшие встречи и кнопки звонка"},
+            {"stats", "День", "Сколько времени за компьютером"}, {"weather", "Погода", "Сейчас, по часам и на неделю"},
+            {"photos", "Фото", "Снимки с NAS сменяют друг друга"}, {"messages", "Сообщения", "Уведомления из мессенджеров"},
+            {"timers", "Таймеры", "Таймер и помодоро"}, {"energy", "Энергия", "Мощность и кто тратит больше"},
     };
 
     private Desks() {}
@@ -91,6 +95,48 @@ final class Desks {
     static String typeName(String type) {
         for (String[] t : TYPES) if (t[0].equals(type)) return t[1];
         return type;
+    }
+
+    /** The settings page behind a kind of block, or null when it has none. */
+    static String settingsPage(String type) {
+        switch (type) {
+            case "clock": return "look";
+            case "energy":
+            case "photos": return "home";
+            case "messages":
+            case "timers": return null;
+            default: return type;
+        }
+    }
+
+    /** Moves a block; toRow counts in the target column as it is now, with the block still in its place. */
+    static void move(JSONArray cols, int col, int row, int toCol, int toRow) throws JSONException {
+        JSONObject from = cols.getJSONObject(col), to = cols.getJSONObject(toCol);
+        List<Object> src = toList(from.getJSONArray("blocks"));
+        Object b = src.remove(row);
+        List<Object> dst = col == toCol ? src : toList(to.getJSONArray("blocks"));
+        int at = col == toCol && toRow > row ? toRow - 1 : toRow;
+        dst.add(Math.max(0, Math.min(at, dst.size())), b);
+        from.put("blocks", fromList(src));
+        if (col != toCol) to.put("blocks", fromList(dst));
+    }
+
+    /** Takes away columns left without blocks; a desk keeps at least one. */
+    static void dropEmptyColumns(JSONObject desk) throws JSONException {
+        List<Object> kept = new ArrayList<>();
+        JSONArray cols = desk.getJSONArray("cols");
+        for (int i = 0; i < cols.length(); i++) {
+            JSONArray b = cols.getJSONObject(i).optJSONArray("blocks");
+            if (b != null && b.length() > 0) kept.add(cols.get(i));
+        }
+        if (kept.isEmpty() && cols.length() > 0) kept.add(cols.get(0));
+        desk.put("cols", fromList(kept));
+    }
+
+    /** Puts new contents into the same array. */
+    static void replace(JSONArray a, List<Object> l) {
+        while (a.length() > 0) a.remove(a.length() - 1);
+        for (Object o : l) a.put(o);
     }
 
     /** [id, name] pairs of a home block. */

@@ -15,7 +15,7 @@ import java.util.List;
 import java.util.Locale;
 
 /**
- * Weather from Open-Meteo, or from met.no where Open-Meteo is out of reach: both free, no key and no sign-up. Now, the next hours and a few days for the place
+ * Weather from Open-Meteo, or from met.no where Open-Meteo is out of reach: both free, no key and no sign-up. Now, the next hours and the week for the place
  * set in the settings (found by the phone's IP address on the first start, or searched by name).
  * The last answer is kept in the profile, so the dashboard shows it at once after a restart or offline.
  */
@@ -30,7 +30,7 @@ final class Weather {
         LocalDate date;
         /** Midnight at the place. */
         long start;
-        double max, min;
+        double max, min, wind;
         int code, rain;
         long sunrise, sunset;
     }
@@ -48,6 +48,8 @@ final class Weather {
     final List<Day> days = new ArrayList<>();
 
     private static final long FRESH_MS = 15 * 60_000L;
+    /** Today and seven more: a forecast fetched before midnight still has a whole week after it. */
+    private static final int DAYS = 8;
 
     static boolean configured(Prefs p) {
         return p.raw().contains("weather_lat");
@@ -106,8 +108,8 @@ final class Weather {
         String url = String.format(Locale.ROOT, "https://api.open-meteo.com/v1/forecast?latitude=%.4f&longitude=%.4f"
                 + "&current=temperature_2m,apparent_temperature,weather_code,wind_speed_10m,relative_humidity_2m,is_day"
                 + "&hourly=temperature_2m,weather_code,precipitation_probability"
-                + "&daily=weather_code,temperature_2m_max,temperature_2m_min,precipitation_probability_max,sunrise,sunset"
-                + "&wind_speed_unit=ms&timezone=auto&forecast_days=4&timeformat=unixtime", lat, lon);
+                + "&daily=weather_code,temperature_2m_max,temperature_2m_min,precipitation_probability_max,sunrise,sunset,wind_speed_10m_max"
+                + "&wind_speed_unit=ms&timezone=auto&forecast_days=" + DAYS + "&timeformat=unixtime", lat, lon);
         return new JSONObject(Net.http("GET", url, null, null, null, 6000));
     }
 
@@ -125,7 +127,7 @@ final class Weather {
     static JSONObject fromMetNo(JSONObject m, double lat, double lon, ZoneId zone, long now) throws Exception {
         JSONArray ts = m.getJSONObject("properties").getJSONArray("timeseries");
         JSONArray ht = new JSONArray(), hte = new JSONArray(), hc = new JSONArray(), hr = new JSONArray();
-        java.util.TreeMap<LocalDate, double[]> byDay = new java.util.TreeMap<>(); // {max, min, code, rain}
+        java.util.TreeMap<LocalDate, double[]> byDay = new java.util.TreeMap<>(); // {max, min, code, rain, wind}
         JSONObject cur = null;
         for (int i = 0; i < ts.length(); i++) {
             JSONObject e = ts.getJSONObject(i);
@@ -153,7 +155,7 @@ final class Weather {
             }
             LocalDate d = Instant.ofEpochMilli(t).atZone(zone).toLocalDate();
             double[] a = byDay.get(d);
-            if (a == null) byDay.put(d, a = new double[]{Double.NaN, Double.NaN, -1, 0});
+            if (a == null) byDay.put(d, a = new double[]{Double.NaN, Double.NaN, -1, 0, 0});
             if (!Double.isNaN(temp)) {
                 a[0] = Double.isNaN(a[0]) ? temp : Math.max(a[0], temp);
                 a[1] = Double.isNaN(a[1]) ? temp : Math.min(a[1], temp);
@@ -161,11 +163,12 @@ final class Weather {
             // the day's icon is its worst weather, as Open-Meteo does it
             if (code >= 0 && (a[2] < 0 || group(code) > group((int) a[2]) || group(code) == group((int) a[2]) && code > a[2])) a[2] = code;
             a[3] = Math.max(a[3], rain);
+            a[4] = Math.max(a[4], det.optDouble("wind_speed", 0));
         }
         JSONArray dt = new JSONArray(), dmx = new JSONArray(), dmn = new JSONArray(), dc = new JSONArray(), dr = new JSONArray(),
-                sr = new JSONArray(), ss = new JSONArray();
+                sr = new JSONArray(), ss = new JSONArray(), dw = new JSONArray();
         for (java.util.Map.Entry<LocalDate, double[]> e : byDay.entrySet()) {
-            if (dt.length() == 4) break;
+            if (dt.length() == DAYS) break;
             double[] a = e.getValue();
             long[] sun = sun(lat, lon, e.getKey());
             dt.put(e.getKey().atStartOfDay(zone).toEpochSecond());
@@ -173,6 +176,7 @@ final class Weather {
             dmn.put(Double.isNaN(a[1]) ? JSONObject.NULL : a[1]);
             dc.put((int) a[2]);
             dr.put((int) a[3]);
+            dw.put(a[4]);
             sr.put(sun[0] / 1000);
             ss.put(sun[1] / 1000);
         }
@@ -185,7 +189,8 @@ final class Weather {
                 .put("hourly", new JSONObject().put("time", ht).put("temperature_2m", hte).put("weather_code", hc)
                         .put("precipitation_probability", hr))
                 .put("daily", new JSONObject().put("time", dt).put("temperature_2m_max", dmx).put("temperature_2m_min", dmn)
-                        .put("weather_code", dc).put("precipitation_probability_max", dr).put("sunrise", sr).put("sunset", ss));
+                        .put("weather_code", dc).put("precipitation_probability_max", dr).put("sunrise", sr).put("sunset", ss)
+                        .put("wind_speed_10m_max", dw));
         if (cur != null) o.put("current", cur);
         return o;
     }
@@ -271,7 +276,7 @@ final class Weather {
         if (d != null) {
             JSONArray t = d.optJSONArray("time"), mx = d.optJSONArray("temperature_2m_max"), mn = d.optJSONArray("temperature_2m_min"),
                     c = d.optJSONArray("weather_code"), r = d.optJSONArray("precipitation_probability_max"),
-                    sr = d.optJSONArray("sunrise"), ss = d.optJSONArray("sunset");
+                    sr = d.optJSONArray("sunrise"), ss = d.optJSONArray("sunset"), wi = d.optJSONArray("wind_speed_10m_max");
             for (int i = 0; t != null && i < t.length(); i++) {
                 Day x = new Day();
                 // daily "time" is midnight at the place
@@ -283,6 +288,7 @@ final class Weather {
                 x.rain = r == null ? 0 : r.optInt(i, 0);
                 x.sunrise = sr == null ? 0 : sr.optLong(i) * 1000;
                 x.sunset = ss == null ? 0 : ss.optLong(i) * 1000;
+                x.wind = wi == null ? 0 : wi.optDouble(i, 0);
                 w.days.add(x);
             }
         }
@@ -313,6 +319,29 @@ final class Weather {
     /** Today at the place (sunrise, sunset, max and min). */
     Day today() {
         return day(placeDate());
+    }
+
+    /** Up to n days, today at the place first. */
+    List<Day> week(int n) {
+        LocalDate today = placeDate();
+        List<Day> out = new ArrayList<>();
+        for (Day d : days) {
+            if (d.date.isBefore(today)) continue;
+            out.add(d);
+            if (out.size() >= n) break;
+        }
+        return out;
+    }
+
+    /** Every step-th hour of a day that the forecast has by the hour; met.no only has the first days. */
+    List<Hour> hoursOf(Day d, int step) {
+        List<Hour> out = new ArrayList<>();
+        int i = 0;
+        for (Hour h : hours) {
+            if (h.time < d.start || h.time >= d.start + 24 * 3_600_000L) continue;
+            if (i++ % step == 0) out.add(h);
+        }
+        return out;
     }
 
     /** The next n hours starting with the current one. */

@@ -629,11 +629,11 @@ public class SettingsActivity extends Activity {
         add(scroll(looks), 4, 4);
         note(lookAbout(prefs.uiStyle()));
 
-        section("Тема");
-        LinearLayout row = new LinearLayout(this);
         JSONObject desk = Desks.load(prefs).optJSONObject(Math.max(0, Math.min(prefs.deskIndex(), Desks.load(prefs).length() - 1)));
-        for (DashTheme t : DashTheme.ALL) {
-            if (t.isNight()) continue;
+        for (boolean lightOnes : new boolean[]{false, true}) {
+          section(lightOnes ? "Светлые темы" : "Тёмные темы");
+          LinearLayout row = new LinearLayout(this);
+          for (DashTheme t : DashTheme.choices(lightOnes)) {
             boolean sel = t.id.equals(th.id);
             LinearLayout card = new LinearLayout(this);
             card.setOrientation(LinearLayout.VERTICAL);
@@ -652,19 +652,21 @@ public class SettingsActivity extends Activity {
                 recreate();
             });
             row.addView(card, chipLp());
+          }
+          add(scroll(row), 4, 4);
         }
-        add(scroll(row), 4, 4);
-        note("На столе: двойной тап по часам — следующая тема.");
+        note("На столе: двойной тап по часам — следующая тема, ⋮ → «Оформление» — все темы, акцент и обои прямо поверх стола.");
 
         section("Акцент");
-        int[][] accents = {{0, 0}, {Ui.BLUE, 1}, {Ui.INDIGO, 1}, {Ui.PURPLE, 1}, {Ui.PINK, 1}, {Ui.RED, 1}, {Ui.ORANGE, 1},
-                {Ui.YELLOW, 1}, {Ui.GREEN, 1}, {Ui.MINT, 1}, {Ui.TEAL, 1}, {Ui.BROWN, 1}};
         LinearLayout acc = new LinearLayout(this);
         int curAcc = prefs.accent();
-        for (int[] a : accents) {
-            int col = a[1] == 0 ? DashTheme.byId(prefs.theme()).accent : a[0];
-            acc.addView(swatch(new int[]{col}, a[0] == curAcc, a[1] == 0 ? "А" : "", v -> {
-                sp.edit().putInt("accent", a[0]).apply();
+        acc.addView(swatch(new int[]{DashTheme.byId(prefs.theme()).accent}, curAcc == 0, "А", v -> {
+            sp.edit().putInt("accent", 0).apply();
+            recreate();
+        }), chipLp());
+        for (int a : Ui.ACCENTS) {
+            acc.addView(swatch(new int[]{a}, a == curAcc, "", v -> {
+                sp.edit().putInt("accent", a).apply();
                 recreate();
             }), chipLp());
         }
@@ -672,10 +674,8 @@ public class SettingsActivity extends Activity {
         note("Цвет кнопок, выделения и часов. «А» — как в теме.");
 
         section("Обои");
-        String[][] walls = {{"none", "Нет"}, {"aurora", "Сияние"}, {"sunset", "Закат"}, {"ocean", "Океан"}, {"graphite", "Графит"},
-                {"dawn", "Рассвет"}, {"sky", "Небо"}};
         LinearLayout wr = new LinearLayout(this);
-        for (String[] wl : walls) {
+        for (String[] wl : DashTheme.WALLPAPERS) {
             int[] g = DashTheme.wallpaper(wl[0]);
             LinearLayout cell = new LinearLayout(this);
             cell.setOrientation(LinearLayout.VERTICAL);
@@ -1036,18 +1036,19 @@ public class SettingsActivity extends Activity {
                     + "«Дом» показывает все устройства по комнатам.";
             case "ribbon": return "Лента дня: часы и погода сверху, ближайшие часы полосой с событиями и прогнозом, "
                     + "внизу музыка и избранные плитки умного дома.";
-            default: return "Виджеты: каждый блок — отдельный виджет, столы из «Столов и блоков» листаются вбок.";
+            default: return "Виджеты: каждый блок — отдельный виджет, столы листаются вбок. Долгий тап по столу — переставить и настроить.";
         }
     }
 
     private void desks() {
         section("Свои столы");
-        primary("Открыть редактор столов", v -> {
+        primary("Изменить виджеты на экране", v -> {
             saveAll();
-            startActivity(new Intent(this, DeskEditorActivity.class));
+            startActivity(new Intent(this, MainActivity.class).putExtra(MainActivity.EXTRA_EDIT, true)
+                    .addFlags(Intent.FLAG_ACTIVITY_CLEAR_TOP | Intent.FLAG_ACTIVITY_SINGLE_TOP));
         });
-        note("Столы листаются свайпом вбок. Каждый — колонки с блоками: часы, календарь, музыка, компьютер, "
-                + "умный дом, созвоны, статистика дня. Там же ⋮ на экране: столы, профиль, настройки.");
+        note("Всё меняется прямо на столе: подержи палец на любом виджете. Виджет перетаскивается пальцем, тап открывает его "
+                + "настройки, полоска между колонками меняет их ширину, кнопка «Столы» — добавить, переименовать, удалить стол.");
 
         section("Готовые варианты");
         note("Заменяют столы этого профиля. Потом всё можно поправить в редакторе.");
@@ -1190,7 +1191,8 @@ public class SettingsActivity extends Activity {
         section("На экране");
         toggle("weather_clock", "Строка погоды под часами", true);
         toggle("weather_rain", "Предупреждать о дожде и снеге в живой строке", true);
-        note("Блок «Погода» (сейчас, по часам, на 3 дня) добавляется в «Столы и блоки». Тап по нему обновляет прогноз.");
+        note("Виджет «Погода» показывает сейчас, часы и неделю; что именно — в его настройках (подержи палец на столе, потом тап "
+                + "по виджету). Тап по виджету открывает неделю по дням.");
     }
 
     /** Search a place by name and save the picked one; shared with the first-start wizard. */
@@ -1303,7 +1305,7 @@ public class SettingsActivity extends Activity {
                 + "Две минуты без мыши и клавиатуры ещё считаются, созвон считается всегда.");
         note("Дашборд: сколько играла музыка и сколько треков, нажатия по умному дому. Календарь: сколько встреч по плану.");
         section("Где смотреть");
-        note("Блок «День» (добавь в «Столы и блоки») и ⋮ → «Статистика дня» на экране.");
+        note("Виджет «День» (подержи палец на столе → «+ Виджет») и ⋮ → «Статистика дня» на экране.");
         JSONObject d = DayStats.today(this);
         note("Сегодня на дашборде: музыка " + HomeDevice.minutes(d.optInt("music_sec") / 60) + ", "
                 + plural(d.optInt("tracks"), "трек", "трека", "треков") + ", "
@@ -1387,7 +1389,7 @@ public class SettingsActivity extends Activity {
         button("Проверить Яндекс", v -> testHome(false));
 
         section("На экране");
-        note("Устройства на экран добавляются в «Столы и блоки» → блок «Умный дом» → «Устройства…». "
+        note("Устройства на экран: подержи палец на столе, тап по виджету «Умный дом» → «Устройства». "
                 + "Тап по плитке включает/выключает, долгий тап — яркость, цвет, температура, пауза печати. "
                 + "В заголовке блока — температура дома, сколько света горит и «Выключить всё».");
 
@@ -1401,7 +1403,7 @@ public class SettingsActivity extends Activity {
                         Toast.makeText(this, "Нужно число, например 6,5", Toast.LENGTH_SHORT).show();
                     }
                 }));
-        note("Виджет «Энергия» (добавь в «Столы и блоки»): мощность сейчас по розеткам и счётчикам с замером, кто тратит больше, "
+        note("Виджет «Энергия» (подержи палец на столе → «+ Виджет»): мощность сейчас по розеткам и счётчикам с замером, кто тратит больше, "
                 + "график за сутки и сколько вышло за сегодня в кВт·ч и рублях.");
 
         section("Автоматизации");

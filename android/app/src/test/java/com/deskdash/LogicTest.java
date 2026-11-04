@@ -244,4 +244,106 @@ public class LogicTest {
         lamp.brightness = 40;
         assertFalse(SmartHome.shows(lamp, dim));
     }
+
+    // ---------------------------------------------------------------- the week, themes, moving widgets
+
+    @Test
+    public void metNoGivesAWeek() throws Exception {
+        StringBuilder m = new StringBuilder("{\"properties\":{\"timeseries\":[");
+        java.time.Instant t = java.time.Instant.parse("2026-11-03T12:00:00Z");
+        for (int i = 0; i < 40; i++) { // ten days every six hours, as the far end of its forecast comes
+            if (i > 0) m.append(',');
+            m.append("{\"time\":\"").append(t.plusSeconds(i * 6 * 3600L)).append("\",\"data\":{\"instant\":{\"details\":{\"air_temperature\":")
+                    .append(i % 4).append(",\"wind_speed\":").append(i % 7).append("}},\"next_6_hours\":{\"summary\":{\"symbol_code\":\"cloudy\"},")
+                    .append("\"details\":{\"precipitation_amount\":0}}}}");
+        }
+        m.append("]}}");
+        org.json.JSONObject daily = Weather.fromMetNo(new org.json.JSONObject(m.toString()), 55.75, 37.62,
+                java.time.ZoneId.of("Europe/Moscow"), t.toEpochMilli()).getJSONObject("daily");
+        assertEquals(8, daily.getJSONArray("time").length());
+        assertEquals(8, daily.getJSONArray("wind_speed_10m_max").length());
+        assertTrue(daily.getJSONArray("wind_speed_10m_max").getDouble(3) > 0);
+    }
+
+    private static double luminance(int c) {
+        double[] v = new double[3];
+        for (int i = 0; i < 3; i++) {
+            double x = (c >> (16 - 8 * i) & 0xFF) / 255.0;
+            v[i] = x <= 0.03928 ? x / 12.92 : Math.pow((x + 0.055) / 1.055, 2.4);
+        }
+        return 0.2126 * v[0] + 0.7152 * v[1] + 0.0722 * v[2];
+    }
+
+    private static double contrast(int a, int b) {
+        double x = luminance(a), y = luminance(b);
+        return (Math.max(x, y) + 0.05) / (Math.min(x, y) + 0.05);
+    }
+
+    @Test
+    public void themesStayReadable() {
+        java.util.Set<String> ids = new java.util.HashSet<>();
+        for (DashTheme t : DashTheme.ALL) {
+            assertTrue(t.id, ids.add(t.id));
+            if (t.isNight()) continue;
+            assertTrue(t.id + " text", contrast(t.text, t.surface) >= 7);
+            assertTrue(t.id + " dim", contrast(t.dim, t.surface) >= 3);
+            assertTrue(t.id + " accent", contrast(t.accent, t.surface) >= 3);
+            assertTrue(t.id + " events", t.events.length > 0);
+        }
+        assertTrue(DashTheme.choices(false).size() + DashTheme.choices(true).size() >= 15);
+        for (DashTheme t : DashTheme.choices(true)) assertTrue(t.light);
+        // the cycle reaches every theme and never a night one
+        java.util.Set<String> seen = new java.util.HashSet<>();
+        String id = "dark";
+        for (int i = 0; i < DashTheme.ALL.length; i++) {
+            id = DashTheme.next(id).id;
+            assertFalse(id, DashTheme.byId(id).isNight());
+            seen.add(id);
+        }
+        assertEquals(DashTheme.choices(false).size() + DashTheme.choices(true).size(), seen.size());
+    }
+
+    private static org.json.JSONArray columns(String... cols) throws Exception {
+        org.json.JSONArray a = new org.json.JSONArray();
+        for (String c : cols) {
+            org.json.JSONArray b = new org.json.JSONArray();
+            for (String t : c.isEmpty() ? new String[0] : c.split(",")) b.put(new org.json.JSONObject().put("t", t));
+            a.put(new org.json.JSONObject().put("w", 50).put("blocks", b));
+        }
+        return a;
+    }
+
+    private static String layout(org.json.JSONArray cols) throws Exception {
+        StringBuilder s = new StringBuilder();
+        for (int i = 0; i < cols.length(); i++) {
+            org.json.JSONArray b = cols.getJSONObject(i).getJSONArray("blocks");
+            if (i > 0) s.append('|');
+            for (int j = 0; j < b.length(); j++) s.append(j > 0 ? "," : "").append(b.getJSONObject(j).getString("t"));
+        }
+        return s.toString();
+    }
+
+    @Test
+    public void widgetsMove() throws Exception {
+        org.json.JSONArray c = columns("a,b,c", "d");
+        Desks.move(c, 0, 0, 0, 2); // before c
+        assertEquals("b,a,c|d", layout(c));
+        Desks.move(c, 0, 2, 0, 0); // to the top
+        assertEquals("c,b,a|d", layout(c));
+        Desks.move(c, 0, 1, 0, 1); // dropped where it was
+        assertEquals("c,b,a|d", layout(c));
+        Desks.move(c, 0, 1, 0, 2); // the gap right after itself
+        assertEquals("c,b,a|d", layout(c));
+        Desks.move(c, 0, 0, 1, 1); // to the end of the next column
+        assertEquals("b,a|d,c", layout(c));
+        Desks.move(c, 1, 1, 0, 0);
+        assertEquals("c,b,a|d", layout(c));
+
+        org.json.JSONObject desk = new org.json.JSONObject().put("cols", columns("", "a", ""));
+        Desks.dropEmptyColumns(desk);
+        assertEquals("a", layout(desk.getJSONArray("cols")));
+        desk.put("cols", columns("", ""));
+        Desks.dropEmptyColumns(desk);
+        assertEquals(1, desk.getJSONArray("cols").length());
+    }
 }
