@@ -4227,6 +4227,10 @@ public class DashboardView extends FrameLayout {
         if (Weather.configured(prefs)) menuRow(m, "Погода", false, this::openWeatherSheet);
         Modes.Mode cur = activeMode();
         menuRow(m, "Режим: " + (cur == null ? "нет" : cur.name) + "…", false, this::openModes);
+        menuRow(m, "Always On сейчас", false, () -> {
+            closeSheet();
+            startAod();
+        });
         menuRow(m, "Оформление…", false, this::openStyle);
         menuRow(m, "Изменить виджеты", false, () -> {
             closeSheet();
@@ -4329,6 +4333,10 @@ public class DashboardView extends FrameLayout {
         barLabel.setVisibility(GONE);
         barLabel.setPadding(px(6), 0, px(2), 0);
         bar.addView(barLabel);
+        ImageView aodNow = iconButton(R.drawable.ic_clock, th.dim, 26);
+        aodNow.setContentDescription("Always On сейчас");
+        aodNow.setOnClickListener(v -> startAod());
+        bar.addView(aodNow, new LinearLayout.LayoutParams(px(26), px(26)));
         ImageView mic = iconButton(R.drawable.ic_mic, th.dim, 26);
         mic.setContentDescription("Голос");
         mic.setOnClickListener(v -> listenVoice());
@@ -4339,6 +4347,13 @@ public class DashboardView extends FrameLayout {
         FrameLayout.LayoutParams lp = new FrameLayout.LayoutParams(-2, -2, Gravity.BOTTOM | Gravity.CENTER_HORIZONTAL);
         lp.bottomMargin = cutB + px(4);
         addView(bar, lp);
+    }
+
+    /** The always-on screen right away, without waiting out the idle time; a touch wakes it as usual. */
+    private void startAod() {
+        aod = true;
+        peeking = false;
+        build();
     }
 
     private void goDesk(int index, int dir) {
@@ -5403,7 +5418,10 @@ public class DashboardView extends FrameLayout {
         int base = "bento".equals(look) || "dock".equals(look) ? px(14) : px(22);
         // the live strip takes the top edge: blocks move down instead of hiding under it
         int top = live != null && live.getVisibility() == VISIBLE ? px(50) : px(16);
-        content.setPadding(base + cutL, top + cutT, base + cutR, (editing ? px(60) : hasBar ? px(34) : px(16)) + cutB);
+        // the always-on clock stands in the middle of the screen itself, not of what the camera cutout leaves of it
+        boolean middle = "aod".equals(look) || "night".equals(look);
+        int left = middle ? Math.max(cutL, cutR) : cutL, right = middle ? Math.max(cutL, cutR) : cutR;
+        content.setPadding(base + left, top + cutT, base + right, (editing ? px(60) : hasBar ? px(34) : px(16)) + cutB);
     }
 
     private int px(float v) {
